@@ -1,0 +1,15 @@
+{
+    "cli": {
+        "intro": "Open Cleaner — 扫描磁盘占用，可选打开 WebView2 GUI。",
+        "cmd": {
+            "scan": "扫描目录并打印体积条目",
+            "gui": "打开 WebView2 GUI（Windows）",
+            "version": "打印包版本"
+        },
+        "opt": {
+            "root": "要扫描的目录（默认系统临时目录）",
+            "limit": "最多打印的条目数",
+            "title": "GUI 窗口标题"
+        }
+    }
+}

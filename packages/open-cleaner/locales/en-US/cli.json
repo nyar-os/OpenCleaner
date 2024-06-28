@@ -1,0 +1,15 @@
+{
+    "cli": {
+        "intro": "Open Cleaner — scan disk usage and open an optional WebView2 GUI.",
+        "cmd": {
+            "scan": "Scan a directory tree and print size entries",
+            "gui": "Open the WebView2 GUI (Windows)",
+            "version": "Print the package version"
+        },
+        "opt": {
+            "root": "Directory to scan (default: system temp)",
+            "limit": "Max entries to print",
+            "title": "GUI window title"
+        }
+    }
+}

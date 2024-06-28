@@ -1,0 +1,17 @@
+{
+    "name": "@wae/open-cleaner-win32-x64",
+    "version": "0.0.0",
+    "description": "Windows x64 native addon for @wae/open-cleaner",
+    "os": ["win32"],
+    "cpu": ["x64"],
+    "main": "open-cleaner.win32-x64.node",
+    "files": [
+        "open-cleaner.win32-x64.node",
+        "README.md"
+    ],
+    "license": "MIT",
+    "engines": {
+        "node": ">=18"
+    },
+    "repository": "https://github.com/nyar-os/OpenCleaner"
+}

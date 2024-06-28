@@ -1,0 +1,25 @@
+name: check-typescript
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+jobs:
+  check-typescript:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build TS
+        run: pnpm run build:ts
+      - name: Build UI
+        run: pnpm run build:ui

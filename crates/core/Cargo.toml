@@ -1,0 +1,13 @@
+[package]
+name = "open-cleaner-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Open Cleaner scan logic (pure Rust)"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

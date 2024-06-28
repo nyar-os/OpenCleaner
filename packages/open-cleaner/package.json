@@ -1,0 +1,40 @@
+{
+    "name": "@wae/open-cleaner",
+    "version": "0.0.0",
+    "description": "Native disk scanner with optional WebView2 GUI — dogfood product for WAE",
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "bin": {
+        "open-cleaner": "./dist/cli.js"
+    },
+    "files": [
+        "dist",
+        "locales",
+        "README.md"
+    ],
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "scripts": {
+        "build": "tsc -p tsconfig.json"
+    },
+    "dependencies": {
+        "@wae/commander": "0.0.0"
+    },
+    "optionalDependencies": {
+        "@wae/open-cleaner-win32-x64": "workspace:*"
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "license": "MIT",
+    "repository": "https://github.com/nyar-os/OpenCleaner",
+    "devDependencies": {
+        "@types/node": "^22.20.4",
+        "typescript": "^5.9.2"
+    }
+}

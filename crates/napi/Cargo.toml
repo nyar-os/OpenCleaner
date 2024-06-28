@@ -1,0 +1,19 @@
+[package]
+name = "open-cleaner-napi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Node-API bindings for open-cleaner (WAE facade + macros)"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+name = "open_cleaner_napi"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+wae = { workspace = true }
+open-cleaner-core = { workspace = true }

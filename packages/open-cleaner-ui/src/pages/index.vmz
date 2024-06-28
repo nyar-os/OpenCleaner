@@ -1,0 +1,287 @@
+<template>
+    <div data-open-cleaner="root" class="oc-root" data-theme="dark">
+        <AppShell brand="Open Cleaner" homeHref="/" navLabel="Navigation" activeId="scan" :nav="navItems">
+            <div class="vmz-slot-content oc-body">
+                <header class="oc-head">
+                    <h1>
+                        {{ title }}
+                    </h1>
+                    <p>
+                        {{ lead }}
+                    </p>
+                </header>
+                <Card :title="scanCardTitle" :description="scanCardDesc">
+                    <Field
+                        :label="rootLabel"
+                        :description="rootDesc"
+                        controlId="oc-root"
+                        descriptionId="oc-root-desc"
+                        errorId="oc-root-err"
+                        describedBy="oc-root-desc"
+                        :value="root"
+                        :placeholder="rootPlaceholder"
+                        @input="onRootInput"
+                    />
+                    <div class="oc-actions">
+                        <Button type="button" :loading="scanning" :disabled="scanning" @click="runScan">
+                            {{ scanLabel }}
+                        </Button>
+                        <Button type="button" variant="secondary" @click="requestClose">
+                            {{ closeLabel }}
+                        </Button>
+                    </div>
+                    <Alert v-if="error" tone="danger" roleName="alert" :title="errorTitle" :description="error" />
+                    <Alert v-else-if="status" tone="info" roleName="status" :title="statusTitle" :description="status" />
+                </Card>
+                <Card :title="resultCardTitle" :description="resultCardDesc">
+                    <div class="oc-stats">
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                {{ totalLabel }}
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ totalText }}
+                            </div>
+                        </div>
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                {{ countLabel }}
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ countText }}
+                            </div>
+                        </div>
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                {{ scannedRootLabel }}
+                            </div>
+                            <div class="oc-stat__value oc-stat__value--path">
+                                {{ scannedRoot }}
+                            </div>
+                        </div>
+                    </div>
+                    <Empty v-if="!rows.length && !scanning" :title="emptyTitle" :description="emptyDesc" />
+                    <Table
+                        v-else
+                        :columns="columns"
+                        :rows="rows"
+                        :loading="scanning"
+                        :loadingLabel="loadingLabel"
+                        :loadingText="loadingText"
+                        :hasRowAction="false"
+                        :sortKey="sortKey"
+                        :sortDir="sortDir"
+                        :onSort="sortBy"
+                    />
+                </Card>
+            </div>
+        </AppShell>
+    </div>
+</template>
+<style>
+.oc-root {
+    min-height: 100vh;
+}
+.oc-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vmz-space-4, 1rem);
+    width: min(var(--vmz-layout-max-width, 75rem), calc(100% - (var(--vmz-layout-gutter, 1rem) * 2)));
+    margin: 0 auto;
+}
+.oc-head h1 {
+    margin: 0 0 0.35rem;
+    font-size: 1.35rem;
+}
+.oc-head p {
+    margin: 0;
+    color: var(--vmz-text-steel, var(--vmz-text-muted, #8b93a7));
+}
+.oc-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--vmz-space-2, 0.5rem);
+    margin-top: var(--vmz-space-3, 0.75rem);
+}
+.oc-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--vmz-space-3, 0.75rem);
+    margin-bottom: var(--vmz-space-4, 1rem);
+}
+.oc-stat {
+    padding: var(--vmz-space-3, 0.75rem);
+    border: 1px solid var(--vmz-line-default, #2a3140);
+    border-radius: var(--vmz-radius-md, 8px);
+    background: var(--vmz-surface-mist, var(--vmz-surface-paper, #1a1e27));
+}
+.oc-stat__label {
+    color: var(--vmz-text-steel, #8b93a7);
+    font-size: 0.75rem;
+}
+.oc-stat__value {
+    margin-top: 0.25rem;
+    font-variant-numeric: tabular-nums;
+    font-size: 1.1rem;
+}
+.oc-stat__value--path {
+    font-size: 0.85rem;
+    word-break: break-all;
+}
+@media (max-width: 720px) {
+    .oc-stats {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+<script client>
+export default class IndexPage {
+    title = "Open Cleaner";
+    lead = "Scan a directory and review the largest entries.";
+    navItems = [{ id: "scan", title: "Scan", href: "/" }];
+    scanCardTitle = "Scan";
+    scanCardDesc = "Choose a root directory, or leave empty for the system temp folder.";
+    rootLabel = "Root directory";
+    rootDesc = "Absolute path to scan.";
+    rootPlaceholder = "Empty = system temp";
+    scanLabel = "Scan";
+    closeLabel = "Close";
+    errorTitle = "Scan failed";
+    statusTitle = "Status";
+    resultCardTitle = "Results";
+    resultCardDesc = "Largest entries from the last scan.";
+    totalLabel = "Total";
+    countLabel = "Entries";
+    scannedRootLabel = "Root";
+    emptyTitle = "No results yet";
+    emptyDesc = "Run a scan to populate this table.";
+    loadingLabel = "Scanning";
+    loadingText = "Working…";
+
+    root = "";
+    scanning = false;
+    error = "";
+    status = "Ready.";
+    totalText = "—";
+    countText = "—";
+    scannedRoot = "—";
+    sortKey = "bytes";
+    sortDir = "desc";
+    columns = [
+        { id: "kind", title: "Kind" },
+        { id: "bytes", title: "Size", align: "right" },
+        { id: "path", title: "Path" },
+    ];
+    rows = [];
+    _seq = 0;
+    _entries = [];
+
+    onMount() {
+        this.installHostBridge();
+        // Only auto-scan inside the native WebView2 host.
+        const bridge = globalThis.chrome && globalThis.chrome.webview;
+        if (bridge && bridge.postMessage) this.runScan();
+    }
+
+    onRootInput(e) {
+        this.root = e && e.target ? String(e.target.value || "") : "";
+    }
+
+    installHostBridge() {
+        const bridge = globalThis.chrome && globalThis.chrome.webview;
+        if (!bridge || !bridge.addEventListener) return;
+        bridge.addEventListener("message", (event) => {
+            let data = event.data;
+            if (typeof data === "string") {
+                try {
+                    data = JSON.parse(data);
+                } catch {
+                    return;
+                }
+            }
+            if (!data || typeof data !== "object") return;
+            if (data.type === "scanResult") {
+                this.scanning = false;
+                this.error = "";
+                this.applyReport(data.report || {});
+                this.status = "Scan complete.";
+            } else if (data.type === "scanError") {
+                this.scanning = false;
+                this.error = String(data.message || "unknown error");
+                this.status = "";
+            }
+        });
+    }
+
+    post(msg) {
+        const bridge = globalThis.chrome && globalThis.chrome.webview;
+        if (!bridge || !bridge.postMessage) {
+            this.error = "Native bridge unavailable (not running inside WebView2).";
+            this.status = "";
+            return false;
+        }
+        bridge.postMessage(JSON.stringify(msg));
+        return true;
+    }
+
+    runScan() {
+        this._seq += 1;
+        this.scanning = true;
+        this.error = "";
+        this.status = "Scanning…";
+        const root = (this.root || "").trim();
+        if (!this.post({ type: "scan", id: this._seq, root: root || undefined })) {
+            this.scanning = false;
+        }
+    }
+
+    requestClose() {
+        this.post({ type: "close" });
+    }
+
+    applyReport(report) {
+        this.scannedRoot = report.root || "—";
+        this.totalText = this.formatBytes(Number(report.totalBytes) || 0);
+        const entries = Array.isArray(report.entries) ? report.entries : [];
+        this._entries = entries.map((entry, index) => ({
+            id: String(index),
+            kind: String(entry.kind || ""),
+            bytes: Number(entry.bytes) || 0,
+            path: String(entry.path || ""),
+        }));
+        this.countText = String(this._entries.length);
+        this.rebuildRows();
+    }
+
+    rebuildRows() {
+        const sorted = this._entries.slice().sort((a, b) => {
+            const dir = this.sortDir === "asc" ? 1 : -1;
+            if (this.sortKey === "bytes") return (a.bytes - b.bytes) * dir;
+            const av = String(a[this.sortKey] || "");
+            const bv = String(b[this.sortKey] || "");
+            return av.localeCompare(bv) * dir;
+        });
+        this.rows = sorted.map((entry) => ({
+            id: entry.id,
+            cells: [entry.kind, this.formatBytes(entry.bytes), entry.path],
+        }));
+    }
+
+    sortBy(key) {
+        if (this.sortKey === key) {
+            this.sortDir = this.sortDir === "asc" ? "desc" : "asc";
+        } else {
+            this.sortKey = key;
+            this.sortDir = key === "bytes" ? "desc" : "asc";
+        }
+        this.rebuildRows();
+    }
+
+    formatBytes(n) {
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+        if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+        return `${(n / 1024 ** 3).toFixed(2)} GB`;
+    }
+}
+</script>

@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/napi",
+]
+default-members = [
+    "crates/core",
+    "crates/napi",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+authors = ["WAE Team <team@wae.dev>"]
+repository = "https://github.com/nyar-os/OpenCleaner"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# Facade from doki-land/wae-framework (pinned rev for CI).
+wae = { git = "https://github.com/doki-land/wae-framework.git", rev = "88cf1f52c26011f32702da909ca38e15039ace29" }
+open-cleaner-core = { path = "crates/core", version = "0.0.0" }
+
+[profile.release]
+lto = true
+panic = "abort"
