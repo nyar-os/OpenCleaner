@@ -4,7 +4,7 @@
     "type": "module",
     "packageManager": "pnpm@10.28.0",
     "description": "Standalone open-cleaner workspace (crates = Rust, packages = TS)",
-    "license": "MIT",
+    "license": "MPL-2.0",
     "scripts": {
         "build:napi": "node --experimental-strip-types scripts/build-napi.ts",
         "build:ts": "pnpm --filter @wae/open-cleaner run build",
