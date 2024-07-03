@@ -1,15 +1,32 @@
 import {
     defaultGuiContentDir,
     loadNative,
+    type Capabilities,
     type OpenGuiOptions,
+    type RegistryOptions,
+    type RegistryReport,
     type ScanOptions,
     type ScanReport,
 } from './native.js';
 
-export type { OpenGuiOptions, ScanEntry, ScanOptions, ScanReport } from './native.js';
+export type { Capabilities, OpenGuiOptions, RegistryEntry, RegistryOptions, RegistryReport, ScanEntry, ScanOptions, ScanReport } from './native.js';
+export { supportedPlatforms } from './native.js';
 
 export function scan(options: ScanOptions = {}): ScanReport {
     return loadNative().scan(options);
+}
+
+/** Report which sinks are available on the current build target. */
+export function capabilities(): Capabilities {
+    return loadNative().capabilities();
+}
+
+/**
+ * Inspect Windows uninstall entries for broken install locations.
+ * Rejects with a structured error on every other platform.
+ */
+export function registryScan(options: RegistryOptions = {}): RegistryReport {
+    return loadNative().registryScan(options);
 }
 
 export function version(): string {

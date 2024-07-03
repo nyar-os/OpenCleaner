@@ -2,7 +2,7 @@
 
 use std::{cell::RefCell, path::PathBuf};
 
-use open_cleaner_core::{ScanOptions, scan};
+use open_cleaner_core::{RegistryOptions, ScanOptions, capabilities, registry_scan, scan};
 use wae::{CallContext, Env, Error, JsValue, Result, function, optional_string_prop, register_module, sys};
 
 #[cfg(windows)]
@@ -101,6 +101,74 @@ fn scan_js(ctx: CallContext) -> Result<JsValue> {
 #[function]
 fn version(ctx: CallContext) -> Result<JsValue> {
     ctx.env().string(env!("CARGO_PKG_VERSION"))
+}
+
+#[function(js_name = "capabilities")]
+fn capabilities_js(ctx: CallContext) -> Result<JsValue> {
+    let caps = capabilities();
+    let env = ctx.env();
+    let obj = env.object()?;
+    obj.set_named("platform", env.string(&caps.platform)?)?;
+    obj.set_named("arch", env.string(&caps.arch)?)?;
+    obj.set_named("fileScan", env.boolean(caps.file_scan)?)?;
+    obj.set_named("registryScan", env.boolean(caps.registry_scan)?)?;
+    obj.set_named("registryClean", env.boolean(caps.registry_clean)?)?;
+    obj.set_named("gui", env.boolean(caps.gui)?)?;
+
+    let notes = env.array_with_length(caps.notes.len())?;
+    for (i, note) in caps.notes.iter().enumerate() {
+        notes.set_element(i as u32, env.string(note)?)?;
+    }
+    obj.set_named("notes", notes)?;
+    Ok(obj)
+}
+
+fn registry_options_from_js(arg: Option<JsValue>) -> Result<RegistryOptions> {
+    let Some(obj) = arg
+    else {
+        return Ok(RegistryOptions { limit: Some(100) });
+    };
+    if obj.is_undefined()? {
+        return Ok(RegistryOptions { limit: Some(100) });
+    }
+    let limit = match obj.get_named("limit") {
+        Ok(v) if !v.is_undefined()? && v.type_of()? == sys::napi_number => Some(v.as_i64()?.max(1) as usize),
+        _ => Some(100),
+    };
+    Ok(RegistryOptions { limit })
+}
+
+fn registry_report_to_js(env: Env, report: &open_cleaner_core::RegistryReport) -> Result<JsValue> {
+    let obj = env.object()?;
+    obj.set_named("platform", env.string(&report.platform)?)?;
+    obj.set_named("scannedKeys", env.int64(report.scanned_keys as i64)?)?;
+    obj.set_named("scannedAtUnixMs", env.int64(report.scanned_at_unix_ms as i64)?)?;
+
+    let arr = env.array_with_length(report.entries.len())?;
+    for (i, entry) in report.entries.iter().enumerate() {
+        let item = env.object()?;
+        item.set_named("key", env.string(&entry.key)?)?;
+        if let Some(value) = &entry.display_name {
+            item.set_named("displayName", env.string(value)?)?;
+        }
+        if let Some(value) = &entry.install_location {
+            item.set_named("installLocation", env.string(value)?)?;
+        }
+        if let Some(value) = &entry.version {
+            item.set_named("version", env.string(value)?)?;
+        }
+        item.set_named("reason", env.string(&entry.reason)?)?;
+        arr.set_element(i as u32, item)?;
+    }
+    obj.set_named("entries", arr)?;
+    Ok(obj)
+}
+
+#[function(js_name = "registryScan")]
+fn registry_scan_js(ctx: CallContext) -> Result<JsValue> {
+    let options = registry_options_from_js(ctx.args().first().copied())?;
+    let report = registry_scan(options).map_err(|e| Error::new(e.to_string()))?;
+    registry_report_to_js(ctx.env(), &report)
 }
 
 #[function(js_name = "openGui")]
@@ -228,4 +296,4 @@ fn resolve_gui_dir() -> Result<PathBuf> {
     Err(Error::new("dist/gui folder not found; pass contentDir to openGui()"))
 }
 
-register_module![scan_js, version, open_gui, pump_events, close_gui, is_gui_open];
+register_module![scan_js, version, capabilities_js, registry_scan_js, open_gui, pump_events, close_gui, is_gui_open];

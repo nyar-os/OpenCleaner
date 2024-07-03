@@ -21,6 +21,35 @@ export type ScanOptions = {
     limit?: number;
 };
 
+export type RegistryOptions = {
+    limit?: number;
+};
+
+export type RegistryEntry = {
+    key: string;
+    displayName?: string;
+    installLocation?: string;
+    version?: string;
+    reason: string;
+};
+
+export type RegistryReport = {
+    platform: string;
+    scannedKeys: number;
+    scannedAtUnixMs: number;
+    entries: RegistryEntry[];
+};
+
+export type Capabilities = {
+    platform: string;
+    arch: string;
+    fileScan: boolean;
+    registryScan: boolean;
+    registryClean: boolean;
+    gui: boolean;
+    notes: string[];
+};
+
 export type OpenGuiOptions = {
     title?: string;
     /** Local folder containing index.html (served via https://app.local/). */
@@ -31,6 +60,8 @@ export type OpenGuiOptions = {
 
 type NativeBinding = {
     scan(options?: ScanOptions): ScanReport;
+    capabilities(): Capabilities;
+    registryScan(options?: RegistryOptions): RegistryReport;
     version(): string;
     openGui(options?: OpenGuiOptions): void;
     pumpEvents(): boolean;
@@ -41,32 +72,53 @@ type NativeBinding = {
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-function platformPackageName(): string {
-    const { platform, arch } = process;
-    if (platform === 'win32' && arch === 'x64') return '@wae/open-cleaner-win32-x64';
-    throw new Error(
-        `Unsupported platform ${platform}-${arch}. Install a matching @wae/open-cleaner-* package.`,
-    );
+type PlatformArch = 'win32-x64' | 'darwin-x64' | 'darwin-arm64' | 'linux-x64' | 'linux-arm64';
+
+const PLATFORM_PACKAGES: Record<PlatformArch, string> = {
+    'win32-x64': '@wae/open-cleaner-win32-x64',
+    'darwin-x64': '@wae/open-cleaner-darwin-x64',
+    'darwin-arm64': '@wae/open-cleaner-darwin-arm64',
+    'linux-x64': '@wae/open-cleaner-linux-x64',
+    'linux-arm64': '@wae/open-cleaner-linux-arm64',
+};
+
+export function supportedPlatforms(): PlatformArch[] {
+    return Object.keys(PLATFORM_PACKAGES) as PlatformArch[];
+}
+
+function currentPlatformArch(): PlatformArch | null {
+    const key = `${process.platform}-${process.arch}`;
+    return (Object.hasOwn(PLATFORM_PACKAGES, key) ? key : null) as PlatformArch | null;
+}
+
+function platformPackageName(pa: PlatformArch): string {
+    return PLATFORM_PACKAGES[pa];
 }
 
 function candidateNodePaths(): string[] {
-    const pkg = platformPackageName();
-    const names = ['open-cleaner.win32-x64.node', 'open_cleaner_napi.node'];
+    const pa = currentPlatformArch();
+    if (!pa) {
+        throw new Error(
+            `Unsupported platform ${process.platform}-${process.arch}. Supported: ${supportedPlatforms().join(', ')}. ` +
+                'Install a matching @wae/open-cleaner-* package.',
+        );
+    }
+
+    const pkg = platformPackageName(pa);
+    const fileName = `open-cleaner.${pa}.node`;
     const paths: string[] = [];
 
     try {
         const pkgJson = require.resolve(`${pkg}/package.json`);
         const root = path.dirname(pkgJson);
-        for (const name of names) {
-            paths.push(path.join(root, name));
-        }
+        paths.push(path.join(root, fileName));
     } catch {
         // optional dependency may be missing during monorepo dev
     }
 
-    // packages/open-cleaner/dist → ../../open-cleaner-win32-x64
+    // packages/open-cleaner/dist → ../../open-cleaner-<platform>-<arch>
     paths.push(
-        path.resolve(here, '../../open-cleaner-win32-x64/open-cleaner.win32-x64.node'),
+        path.resolve(here, `../../open-cleaner-${pa}/${fileName}`),
         path.resolve(here, '../../../target/release/open_cleaner_napi.node'),
     );
     return paths;

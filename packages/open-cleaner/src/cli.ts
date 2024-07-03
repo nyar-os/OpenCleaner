@@ -5,7 +5,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCli } from '@wae/commander';
-import { runGui, scan, version } from './index.js';
+import { capabilities, registryScan, runGui, scan, version } from './index.js';
 
 function formatBytes(n: number): string {
     if (n < 1024) return `${n} B`;
@@ -39,6 +39,35 @@ cli.command('scan', 'cli.cmd.scan')
             console.log(`${formatBytes(entry.bytes).padStart(10)}  ${entry.kind.padEnd(6)}  ${entry.path}`);
         }
         return 0;
+    });
+
+cli.command('capabilities', 'cli.cmd.capabilities').actionCtx(async () => {
+    console.log(JSON.stringify(capabilities(), null, 2));
+    return 0;
+});
+
+cli.command('registry', 'cli.cmd.registry')
+    .option('--limit <n>', 'cli.opt.limit', {
+        coerce: (raw) => {
+            const n = Number(raw);
+            if (!Number.isFinite(n) || n < 1) throw new Error(`invalid --limit: ${raw}`);
+            return String(Math.floor(n));
+        },
+    })
+    .actionCtx(async (options) => {
+        const limitRaw = typeof options.limit === 'string' ? options.limit : undefined;
+        try {
+            const report = registryScan({ limit: limitRaw ? Number(limitRaw) : undefined });
+            console.log(`platform: ${report.platform}`);
+            console.log(`scanned keys: ${report.scannedKeys}`);
+            for (const entry of report.entries) {
+                console.log(`${entry.reason}  ${entry.displayName ?? entry.key}  ${entry.installLocation ?? ''}`);
+            }
+            return 0;
+        } catch (err) {
+            console.error(err instanceof Error ? err.message : String(err));
+            return 1;
+        }
     });
 
 cli.command('gui', 'cli.cmd.gui')

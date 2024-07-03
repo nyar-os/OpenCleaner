@@ -3,6 +3,8 @@
         "intro": "Open Cleaner — scan disk usage and open an optional WebView2 GUI.",
         "cmd": {
             "scan": "Scan a directory tree and print size entries",
+            "capabilities": "Print platform capabilities as JSON",
+            "registry": "Inspect Windows uninstall entries for broken install locations",
             "gui": "Open the WebView2 GUI (Windows)",
             "version": "Print the package version"
         },

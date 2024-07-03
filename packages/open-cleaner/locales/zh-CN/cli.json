@@ -3,6 +3,8 @@
         "intro": "Open Cleaner — 扫描磁盘占用，可选打开 WebView2 GUI。",
         "cmd": {
             "scan": "扫描目录并打印体积条目",
+            "capabilities": "以 JSON 打印当前平台能力",
+            "registry": "检查 Windows 卸载项中失效的安装路径",
             "gui": "打开 WebView2 GUI（Windows）",
             "version": "打印包版本"
         },
