@@ -28,9 +28,29 @@ importers:
         specifier: ^5.9.2
         version: 5.9.3
     optionalDependencies:
+      '@wae/open-cleaner-darwin-arm64':
+        specifier: workspace:*
+        version: link:../open-cleaner-darwin-arm64
+      '@wae/open-cleaner-darwin-x64':
+        specifier: workspace:*
+        version: link:../open-cleaner-darwin-x64
+      '@wae/open-cleaner-linux-arm64':
+        specifier: workspace:*
+        version: link:../open-cleaner-linux-arm64
+      '@wae/open-cleaner-linux-x64':
+        specifier: workspace:*
+        version: link:../open-cleaner-linux-x64
       '@wae/open-cleaner-win32-x64':
         specifier: workspace:*
         version: link:../open-cleaner-win32-x64
+
+  packages/open-cleaner-darwin-arm64: {}
+
+  packages/open-cleaner-darwin-x64: {}
+
+  packages/open-cleaner-linux-arm64: {}
+
+  packages/open-cleaner-linux-x64: {}
 
   packages/open-cleaner-ui:
     dependencies:

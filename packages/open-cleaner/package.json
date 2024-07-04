@@ -26,6 +26,10 @@
         "@wae/commander": "0.0.0"
     },
     "optionalDependencies": {
+        "@wae/open-cleaner-darwin-arm64": "workspace:*",
+        "@wae/open-cleaner-darwin-x64": "workspace:*",
+        "@wae/open-cleaner-linux-arm64": "workspace:*",
+        "@wae/open-cleaner-linux-x64": "workspace:*",
         "@wae/open-cleaner-win32-x64": "workspace:*"
     },
     "engines": {

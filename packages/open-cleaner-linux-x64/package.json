@@ -1,0 +1,17 @@
+{
+    "name": "@wae/open-cleaner-linux-x64",
+    "version": "0.0.0",
+    "description": "Linux x64 native addon for @wae/open-cleaner",
+    "os": ["linux"],
+    "cpu": ["x64"],
+    "main": "open-cleaner.linux-x64.node",
+    "files": [
+        "open-cleaner.linux-x64.node",
+        "README.md"
+    ],
+    "license": "MPL-2.0",
+    "engines": {
+        "node": ">=18"
+    },
+    "repository": "https://github.com/nyar-os/OpenCleaner"
+}

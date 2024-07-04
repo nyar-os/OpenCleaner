@@ -1,0 +1,17 @@
+{
+    "name": "@wae/open-cleaner-darwin-x64",
+    "version": "0.0.0",
+    "description": "macOS x64 native addon for @wae/open-cleaner",
+    "os": ["darwin"],
+    "cpu": ["x64"],
+    "main": "open-cleaner.darwin-x64.node",
+    "files": [
+        "open-cleaner.darwin-x64.node",
+        "README.md"
+    ],
+    "license": "MPL-2.0",
+    "engines": {
+        "node": ">=18"
+    },
+    "repository": "https://github.com/nyar-os/OpenCleaner"
+}
