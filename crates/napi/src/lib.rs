@@ -1,5 +1,6 @@
 //! Node-API surface for `@wae/open-cleaner` via the WAE facade.
 
+#[cfg(windows)]
 use std::{cell::RefCell, path::PathBuf};
 
 use open_cleaner_core::{RegistryOptions, ScanOptions, capabilities, registry_scan, scan};
@@ -8,12 +9,13 @@ use wae::{CallContext, Env, Error, JsValue, Result, function, optional_string_pr
 #[cfg(windows)]
 use wae::webview::{IpcHandler, IpcOutcome, OpenOptions, WebViewHost};
 
+#[cfg(windows)]
 thread_local! {
     static GUI: RefCell<Option<GuiState>> = const { RefCell::new(None) };
 }
 
+#[cfg(windows)]
 struct GuiState {
-    #[cfg(windows)]
     host: WebViewHost,
 }
 
@@ -176,7 +178,7 @@ fn open_gui(ctx: CallContext) -> Result<JsValue> {
     #[cfg(not(windows))]
     {
         let _ = ctx;
-        return Err(Error::new("openGui is only supported on Windows"));
+        Err(Error::new("openGui is only supported on Windows"))
     }
     #[cfg(windows)]
     {
@@ -223,7 +225,7 @@ fn open_gui_impl(ctx: CallContext) -> Result<JsValue> {
 fn pump_events(ctx: CallContext) -> Result<JsValue> {
     #[cfg(not(windows))]
     {
-        return ctx.env().boolean(false);
+        ctx.env().boolean(false)
     }
     #[cfg(windows)]
     {
@@ -262,7 +264,7 @@ fn close_gui(ctx: CallContext) -> Result<JsValue> {
 fn is_gui_open(ctx: CallContext) -> Result<JsValue> {
     #[cfg(not(windows))]
     {
-        return ctx.env().boolean(false);
+        ctx.env().boolean(false)
     }
     #[cfg(windows)]
     {
@@ -271,6 +273,7 @@ fn is_gui_open(ctx: CallContext) -> Result<JsValue> {
     }
 }
 
+#[cfg(windows)]
 fn resolve_gui_dir() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("OPEN_CLEANER_GUI") {
         let path = PathBuf::from(p);
