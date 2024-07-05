@@ -7,15 +7,29 @@ on:
 
 jobs:
   check-rust:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # Reads rust-toolchain.toml so CI cannot drift from the pinned channel.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: cargo fmt
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test
         run: cargo test --workspace
+      - name: build native addon
+        run: cargo build -p open-cleaner-napi --release
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - name: stage platform package
+        run: node --experimental-strip-types scripts/stage-native.ts
+      - name: native smoke
+        run: node --experimental-strip-types scripts/smoke-native.ts
