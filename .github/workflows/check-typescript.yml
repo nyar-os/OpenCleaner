@@ -21,5 +21,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build TS
         run: pnpm run build:ts
+      - name: Check agent skills
+        run: pnpm run check:skills
       - name: Build UI
         run: pnpm run build:ui
