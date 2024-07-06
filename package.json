@@ -12,6 +12,7 @@
         "build": "pnpm run build:napi && pnpm run build:ts && pnpm run build:ui",
         "stage:native": "node --experimental-strip-types scripts/stage-native.ts",
         "smoke:native": "node --experimental-strip-types scripts/smoke-native.ts",
+        "check:skills": "node --experimental-strip-types scripts/check-skills.ts",
         "check:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace",
         "gui": "pnpm run build && pnpm --filter @wae/open-cleaner exec node ./dist/cli.js gui"
     },

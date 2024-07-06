@@ -1,0 +1,19 @@
+{
+    "name": "@wae/open-cleaner-skills",
+    "version": "0.0.0",
+    "description": "Agent skills for the OpenCleaner CLI",
+    "license": "MPL-2.0",
+    "files": [
+        "skills",
+        "README.md"
+    ],
+    "keywords": [
+        "agent-skills",
+        "open-cleaner",
+        "disk-cleanup"
+    ],
+    "engines": {
+        "node": ">=18"
+    },
+    "repository": "https://github.com/nyar-os/OpenCleaner"
+}
