@@ -9,7 +9,7 @@
  * - each skill contains at least one backticked `open-cleaner <command>` invocation
  * - every referenced command exists in `open-cleaner --help`
  * - every referenced flag exists in `<command> --help`
- * - no internal decision-document paths are linked
+ * - no link or path in a skill leaves the published skills tree
  * - the skills package version matches the owning app package and uses `MPL-2.0`
  */
 import { execFileSync } from 'node:child_process';
@@ -23,11 +23,33 @@ const skillsPackage = path.join(root, 'packages', 'open-cleaner-skills', 'packag
 const appPackage = path.join(root, 'packages', 'open-cleaner', 'package.json');
 const cli = path.join(root, 'packages', 'open-cleaner', 'dist', 'cli.js');
 
-const FORBIDDEN = ['决策和进度表', '规划设计', 'handoff', 'HANDOFF', 'docs/'];
-
 function fail(message: string): never {
     console.error(`check-skills failed: ${message}`);
     process.exit(1);
+}
+
+/**
+ * Published skills may link to the network or to files inside the skills
+ * package. Everything else is rejected by shape: filesystem paths (absolute,
+ * drive-letter, home, file URL), parent traversal, and local targets that do
+ * not resolve to a packaged file. No directory name list is kept here.
+ */
+function assertNoOutOfPackageReferences(source: string, file: string, dir: string): void {
+    for (const match of source.matchAll(/\]\(([^)\s]+)(?:\s+[^)]*)?\)/g)) {
+        const target = match[1];
+        if (/^(?:https?:|mailto:)/i.test(target) || target.startsWith('#')) continue;
+        if (/^(?:[a-z]:[\\/]|[\\/]|~[\\/]|file:)/i.test(target) || target.includes('..')) {
+            fail(`${file}: link target \`${target}\` must stay inside the skills package`);
+        }
+        const resolved = path.resolve(dir, target.split('#')[0]);
+        const relative = path.relative(skillsRoot, resolved);
+        if (relative.startsWith('..') || path.isAbsolute(relative) || !fs.existsSync(resolved)) {
+            fail(`${file}: link target \`${target}\` is not a file inside the skills package`);
+        }
+    }
+    for (const match of source.matchAll(/(?:^|[\s`"'(（])((?:[a-z]:[\\/]|~[\\/]|file:\/\/)[^\s`"'()）]+)/gi)) {
+        fail(`${file}: filesystem path \`${match[1]}\` must not appear in a published skill`);
+    }
 }
 
 function runCli(args: string[]): string {
@@ -127,9 +149,7 @@ for (const dir of skillDirs) {
     if (meta.name !== dir) fail(`${dir}: frontmatter \`name\` does not match the directory`);
 
     if (!/^##\s+Safety\b/m.test(body)) fail(`${dir}: missing a \`## Safety\` section`);
-    for (const needle of FORBIDDEN) {
-        if (source.includes(needle)) fail(`${dir}: contains forbidden internal path \`${needle}\``);
-    }
+    assertNoOutOfPackageReferences(source, `skills/${dir}/SKILL.md`, path.join(skillsRoot, dir));
 
     const invocations = [...source.matchAll(/`(open-cleaner [^`\n]+)`/g)].map((match) => match[1].trim());
     if (invocations.length === 0) fail(`${dir}: no backticked \`open-cleaner\` invocation found`);
