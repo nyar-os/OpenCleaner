@@ -2,14 +2,16 @@
 //! checks.
 //!
 //! This module owns the only platform `cfg` decision surface in the core. A
-//! missing capability must surface as [`Error::Unsupported`] rather than as an
+//! missing capability must surface as [`Error::Capability`] rather than as an
 //! empty result or a substituted algorithm.
 
-use std::fs::Metadata;
+use std::{
+    fs::Metadata,
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(not(windows))]
 use crate::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,16 +50,23 @@ pub const fn arch() -> &'static str {
 
 /// Capabilities visible on the current build target.
 ///
-/// `registry_clean` stays `false` everywhere because deletion is not
-/// implemented in this build. It is a declared limitation, not a silent
-/// success path.
+/// A `false` flag means the gated call fails with a structured
+/// [`crate::CapabilityState`] code; it never means "empty result".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Capabilities {
     pub platform: String,
     pub arch: String,
     pub file_scan: bool,
+    pub dev_scan: bool,
+    pub dev_clean: bool,
+    /// Whether [`crate::dev`] uses the OS recycle bin instead of permanent
+    /// deletion.
+    pub trash: bool,
     pub registry_scan: bool,
     pub registry_clean: bool,
+    pub env_path_scan: bool,
+    pub env_path_clean: bool,
+    pub software_scan: bool,
     pub gui: bool,
     pub notes: Vec<String>,
 }
@@ -72,23 +81,73 @@ pub fn capabilities() -> Capabilities {
         notes.push(format!("registry scanning is unavailable on {platform}"));
         notes.push("WebView2 GUI is unavailable outside Windows".to_string());
     }
+    if !cfg!(windows) {
+        notes.push("PATH edits are unavailable outside Windows".to_string());
+        notes.push("software residue scanning is unavailable outside Windows".to_string());
+    }
+    if !trash_available() {
+        notes.push(format!("recycle bin is unavailable on {}; deletions are permanent", name()));
+    }
 
     Capabilities {
         platform: name().to_string(),
         arch: arch().to_string(),
         file_scan: true,
+        dev_scan: true,
+        dev_clean: true,
+        trash: trash_available(),
         registry_scan: cfg!(windows),
         registry_clean: false,
+        env_path_scan: false,
+        env_path_clean: false,
+        software_scan: false,
         gui: cfg!(windows),
         notes,
     }
 }
 
-/// Build the structured failure for a capability that is not available on the
-/// current platform.
+/// Recycle-bin availability for this build and OS.
+#[cfg(windows)]
+pub(crate) const fn trash_available() -> bool {
+    true
+}
+
 #[cfg(not(windows))]
+pub(crate) const fn trash_available() -> bool {
+    false
+}
+
+/// Build the structured failure for a capability that is not available on the
+/// current platform. Dead code on the platform that implements the capability.
+#[allow(dead_code)]
 pub(crate) fn unsupported(capability: &'static str) -> Error {
-    Error::Unsupported { capability, platform: name() }
+    Error::unsupported_platform(capability)
+}
+
+/// Volume identity used to explain cross-volume deletions.
+#[cfg(windows)]
+pub(crate) fn volume_of(path: &Path) -> Option<String> {
+    use std::path::{Component, Prefix};
+
+    match path.components().next()? {
+        Component::Prefix(prefix) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => Some(format!("{}:", char::from(letter).to_ascii_uppercase())),
+            _ => Some(prefix.as_os_str().to_string_lossy().to_string()),
+        },
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn volume_of(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    fs_metadata(path).map(|meta| format!("dev:{}", meta.dev()))
+}
+
+#[cfg(not(windows))]
+fn fs_metadata(path: &Path) -> Option<Metadata> {
+    std::fs::symlink_metadata(path).ok()
 }
 
 /// Windows junctions and reparse points can form cycles in temp trees, so the

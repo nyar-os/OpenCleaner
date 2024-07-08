@@ -2,7 +2,8 @@
 //!
 //! The domain type is platform-neutral. The Windows implementation is the only
 //! place that talks to the registry. Other targets fail with
-//! [`Error::Unsupported`] instead of returning an empty report.
+//! [`Error::Capability`] (`unsupported_platform`) instead of returning an empty
+//! report.
 
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +68,7 @@ mod tests {
     #[test]
     fn registry_scan_fails_without_windows() {
         let err = registry_scan(RegistryOptions::default()).unwrap_err();
-        assert!(matches!(err, crate::Error::Unsupported { capability: "registry-scan", .. }), "unexpected: {err}");
+        assert_eq!(crate::capability_code(&err), Some("unsupported_platform"), "unexpected: {err}");
+        assert!(matches!(err, crate::Error::Capability { capability: "registry-scan", .. }), "unexpected: {err}");
     }
 }
