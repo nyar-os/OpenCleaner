@@ -1,31 +1,39 @@
 //! Node-API surface for `@wae/open-cleaner` via the WAE facade.
+//!
+//! This crate is platform-agnostic: the GUI host, window and event pump all
+//! forward to `wae::webview`, which selects a backend per compile target and
+//! reports missing capabilities as structured [`wae::webview::WebViewError`]
+//! values. There is no `cfg` branch here and no platform-specific message.
+//!
+//! Every exported capability is recorded through [`audit::run`], including the
+//! GUI IPC path.
 
-#[cfg(windows)]
+mod audit;
+
 use std::{cell::RefCell, path::PathBuf};
 
-use open_cleaner_core::{RegistryOptions, ScanOptions, capabilities, registry_scan, scan};
-use wae::{CallContext, Env, Error, JsValue, Result, function, optional_string_prop, register_module, sys};
+use open_cleaner_core::{CapabilityState, Error as CoreError, RegistryOptions, ScanOptions, capabilities, registry_scan, scan};
+use serde_json::{Value, json};
+use wae::{
+    CallContext, Env, Error, JsValue, Result,
+    audit::{Actor, ActorKind, Mode, Query},
+    function, optional_string_prop, register_module, sys,
+    webview::{IpcHandler, IpcOutcome, OpenOptions, WebViewHost},
+};
 
-#[cfg(windows)]
-use wae::webview::{IpcHandler, IpcOutcome, OpenOptions, WebViewHost};
-
-#[cfg(windows)]
 thread_local! {
     static GUI: RefCell<Option<GuiState>> = const { RefCell::new(None) };
 }
 
-#[cfg(windows)]
 struct GuiState {
     host: WebViewHost,
 }
 
-#[cfg(windows)]
 struct ScanIpcHandler;
 
-#[cfg(windows)]
 impl IpcHandler for ScanIpcHandler {
     fn on_ipc(&mut self, message: &str) -> IpcOutcome {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(message)
+        let Ok(value) = serde_json::from_str::<Value>(message)
         else {
             return IpcOutcome::Ignored;
         };
@@ -33,11 +41,11 @@ impl IpcHandler for ScanIpcHandler {
         match ty {
             "close" => IpcOutcome::CloseWindow,
             "scan" => {
-                let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                let id = value.get("id").cloned().unwrap_or(Value::Null);
                 let root = value.get("root").and_then(|v| v.as_str()).map(|s| s.to_string());
-                match scan(ScanOptions { root, limit: Some(100) }) {
+                match audited_scan(ScanOptions { root, limit: Some(100) }) {
                     Ok(report) => {
-                        let reply = serde_json::json!({
+                        let reply = json!({
                             "type": "scanResult",
                             "id": id,
                             "report": report,
@@ -45,7 +53,7 @@ impl IpcHandler for ScanIpcHandler {
                         IpcOutcome::ReplyToPage(reply.to_string())
                     }
                     Err(err) => {
-                        let reply = serde_json::json!({
+                        let reply = json!({
                             "type": "scanError",
                             "id": id,
                             "message": err.to_string(),
@@ -54,9 +62,46 @@ impl IpcHandler for ScanIpcHandler {
                     }
                 }
             }
+            "audit" => {
+                let id = value.get("id").cloned().unwrap_or(Value::Null);
+                let filter = query_from_value(Some(&value));
+                match audit::query(&filter) {
+                    Ok(entries) => {
+                        let reply = json!({ "type": "auditResult", "id": id, "entries": entries });
+                        IpcOutcome::ReplyToPage(reply.to_string())
+                    }
+                    Err(err) => {
+                        let reply = json!({ "type": "auditError", "id": id, "message": err.to_string() });
+                        IpcOutcome::ReplyToPage(reply.to_string())
+                    }
+                }
+            }
             _ => IpcOutcome::Ignored,
         }
     }
+}
+
+fn core_error(error: CoreError) -> Error {
+    Error::new(error.to_string())
+}
+
+fn webview_error(error: wae::webview::WebViewError) -> CoreError {
+    if matches!(error, wae::webview::WebViewError::Unsupported { .. }) {
+        return CoreError::Capability { capability: "gui", state: CapabilityState::UnsupportedPlatform, detail: error.to_string() };
+    }
+    CoreError::Message(error.to_string())
+}
+
+fn audited_scan(options: ScanOptions) -> Result<open_cleaner_core::ScanReport> {
+    let params = json!({ "root": options.root, "limit": options.limit });
+    let report = audit::run("scan", Mode::DryRun, params, || {
+        let report = scan(options)?;
+        let count = report.entries.len() as u64;
+        let summary = format!("root {}, {} entries, {} bytes", report.root, report.entries.len(), report.total_bytes);
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)?;
+    Ok(report)
 }
 
 fn scan_options_from_js(arg: Option<JsValue>) -> Result<ScanOptions> {
@@ -96,18 +141,26 @@ fn report_to_js(env: Env, report: &open_cleaner_core::ScanReport) -> Result<JsVa
 #[function(js_name = "scan")]
 fn scan_js(ctx: CallContext) -> Result<JsValue> {
     let options = scan_options_from_js(ctx.args().first().copied())?;
-    let report = scan(options).map_err(|e| Error::new(e.to_string()))?;
+    let report = audited_scan(options)?;
     report_to_js(ctx.env(), &report)
 }
 
 #[function]
 fn version(ctx: CallContext) -> Result<JsValue> {
-    ctx.env().string(env!("CARGO_PKG_VERSION"))
+    let version = env!("CARGO_PKG_VERSION");
+    audit::run("version", Mode::DryRun, Value::Null, || Ok(((), audit::Summary::new(0, format!("version {version}"))))).map_err(core_error)?;
+    ctx.env().string(version)
 }
 
 #[function(js_name = "capabilities")]
 fn capabilities_js(ctx: CallContext) -> Result<JsValue> {
-    let caps = capabilities();
+    let caps = audit::run("capabilities", Mode::DryRun, Value::Null, || {
+        let caps = capabilities();
+        let summary = format!("platform {} {}", caps.platform, caps.arch);
+        Ok((caps, audit::Summary::new(0, summary)))
+    })
+    .map_err(core_error)?;
+
     let env = ctx.env();
     let obj = env.object()?;
     obj.set_named("platform", env.string(&caps.platform)?)?;
@@ -115,7 +168,10 @@ fn capabilities_js(ctx: CallContext) -> Result<JsValue> {
     obj.set_named("fileScan", env.boolean(caps.file_scan)?)?;
     obj.set_named("registryScan", env.boolean(caps.registry_scan)?)?;
     obj.set_named("registryClean", env.boolean(caps.registry_clean)?)?;
-    obj.set_named("gui", env.boolean(caps.gui)?)?;
+    // The GUI host is provided by the `wae` facade, which compiles for every
+    // target this crate supports. Availability is still confirmed per call by
+    // the structured `Unsupported` error returned from `openGui`.
+    obj.set_named("gui", env.boolean(true)?)?;
 
     let notes = env.array_with_length(caps.notes.len())?;
     for (i, note) in caps.notes.iter().enumerate() {
@@ -169,25 +225,19 @@ fn registry_report_to_js(env: Env, report: &open_cleaner_core::RegistryReport) -
 #[function(js_name = "registryScan")]
 fn registry_scan_js(ctx: CallContext) -> Result<JsValue> {
     let options = registry_options_from_js(ctx.args().first().copied())?;
-    let report = registry_scan(options).map_err(|e| Error::new(e.to_string()))?;
+    let limit = options.limit;
+    let report = audit::run("registry-scan", Mode::DryRun, json!({ "limit": limit }), || {
+        let report = registry_scan(options)?;
+        let count = report.entries.len() as u64;
+        let summary = format!("platform {}, {} stale entries out of {} keys", report.platform, report.entries.len(), report.scanned_keys);
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)?;
     registry_report_to_js(ctx.env(), &report)
 }
 
 #[function(js_name = "openGui")]
 fn open_gui(ctx: CallContext) -> Result<JsValue> {
-    #[cfg(not(windows))]
-    {
-        let _ = ctx;
-        Err(Error::new("openGui is only supported on Windows"))
-    }
-    #[cfg(windows)]
-    {
-        open_gui_impl(ctx)
-    }
-}
-
-#[cfg(windows)]
-fn open_gui_impl(ctx: CallContext) -> Result<JsValue> {
     let mut title = "Open Cleaner".to_string();
     let mut content_dir: Option<String> = None;
     let mut entry_url: Option<String> = None;
@@ -202,18 +252,23 @@ fn open_gui_impl(ctx: CallContext) -> Result<JsValue> {
         entry_url = optional_string_prop(arg, "entryUrl")?;
     }
 
-    let options = if let Some(dir) = content_dir {
-        OpenOptions::from_content_dir(dir, title)
-    }
-    else if let Some(url) = entry_url {
-        OpenOptions::from_url(url, title)
-    }
-    else {
-        let dir = resolve_gui_dir()?;
-        OpenOptions::from_content_dir(dir.display().to_string(), title)
-    };
-
-    let host = WebViewHost::open(options, Box::new(ScanIpcHandler)).map_err(|e| Error::new(e.to_string()))?;
+    let params = json!({ "title": title, "contentDir": content_dir, "entryUrl": entry_url });
+    let host = audit::run("gui-open", Mode::Execute, params, || {
+        let options = if let Some(dir) = content_dir.clone() {
+            OpenOptions::from_content_dir(dir, title.clone())
+        }
+        else if let Some(url) = entry_url.clone() {
+            OpenOptions::from_url(url, title.clone())
+        }
+        else {
+            let dir = resolve_gui_dir().map_err(|error| CoreError::Message(error.to_string()))?;
+            OpenOptions::from_content_dir(dir.display().to_string(), title.clone())
+        };
+        let host = WebViewHost::open(options, Box::new(ScanIpcHandler)).map_err(webview_error)?;
+        let summary = format!("window opened with {} backend", host.backend_name());
+        Ok((host, audit::Summary::new(1, summary)))
+    })
+    .map_err(core_error)?;
 
     GUI.with(|slot| {
         *slot.borrow_mut() = Some(GuiState { host });
@@ -223,12 +278,7 @@ fn open_gui_impl(ctx: CallContext) -> Result<JsValue> {
 
 #[function(js_name = "pumpEvents")]
 fn pump_events(ctx: CallContext) -> Result<JsValue> {
-    #[cfg(not(windows))]
-    {
-        ctx.env().boolean(false)
-    }
-    #[cfg(windows)]
-    {
+    let alive = audit::run("gui-pump", Mode::Execute, Value::Null, || {
         let alive = GUI.with(|slot| {
             let mut guard = slot.borrow_mut();
             match guard.as_mut() {
@@ -242,38 +292,177 @@ fn pump_events(ctx: CallContext) -> Result<JsValue> {
                 None => false,
             }
         });
-        ctx.env().boolean(alive)
-    }
+        Ok((alive, audit::Summary::new(1, if alive { "window alive" } else { "window closed" })))
+    })
+    .map_err(core_error)?;
+    ctx.env().boolean(alive)
 }
 
 #[function(js_name = "closeGui")]
 fn close_gui(ctx: CallContext) -> Result<JsValue> {
-    #[cfg(windows)]
-    {
-        GUI.with(|slot| {
+    audit::run("gui-close", Mode::Execute, Value::Null, || {
+        let closed = GUI.with(|slot| {
             let mut guard = slot.borrow_mut();
             if let Some(mut state) = guard.take() {
                 let _ = state.host.close();
+                true
+            }
+            else {
+                false
             }
         });
-    }
+        Ok(((), audit::Summary::new(1, if closed { "window closed" } else { "no window" })))
+    })
+    .map_err(core_error)?;
     ctx.env().undefined()
 }
 
 #[function(js_name = "isGuiOpen")]
 fn is_gui_open(ctx: CallContext) -> Result<JsValue> {
-    #[cfg(not(windows))]
-    {
-        ctx.env().boolean(false)
-    }
-    #[cfg(windows)]
-    {
+    let open = audit::run("gui-status", Mode::DryRun, Value::Null, || {
         let open = GUI.with(|slot| slot.borrow().as_ref().map(|s| s.host.is_alive()).unwrap_or(false));
-        ctx.env().boolean(open)
+        Ok((open, audit::Summary::new(1, if open { "open" } else { "closed" })))
+    })
+    .map_err(core_error)?;
+    ctx.env().boolean(open)
+}
+
+#[function(js_name = "configureAudit")]
+fn configure_audit_js(ctx: CallContext) -> Result<JsValue> {
+    let arg = ctx.arg(0).ok();
+    let actor = actor_from_js(arg)?;
+    let session = optional_string_prop_of(arg, "session")?;
+    let host = optional_string_prop_of(arg, "host")?;
+    audit::configure(actor, session, host);
+    ctx.env().undefined()
+}
+
+#[function(js_name = "auditQuery")]
+fn audit_query_js(ctx: CallContext) -> Result<JsValue> {
+    let filter = query_from_js(ctx.arg(0).ok())?;
+    let params = query_params(&filter);
+    let entries = audit::run("audit-query", Mode::DryRun, params, || {
+        let entries = audit::query(&filter).map_err(|error| CoreError::Message(error.to_string()))?;
+        Ok((entries, audit::Summary::new(0, "audit history queried")))
+    })
+    .map_err(core_error)?;
+    json_to_js(ctx.env(), &serde_json::to_value(&entries).unwrap_or(Value::Null))
+}
+
+fn query_params(filter: &Query) -> Value {
+    let actor_kind = filter.actor_kind.map(|kind| if kind == ActorKind::Agent { "agent" } else { "user" });
+    json!({
+        "actorKind": actor_kind,
+        "actorId": filter.actor_id.as_deref(),
+        "fromMs": filter.from_ms,
+        "toMs": filter.to_ms,
+        "capability": filter.capability.as_deref(),
+        "limit": filter.limit,
+    })
+}
+
+fn optional_string_prop_of(arg: Option<JsValue>, name: &str) -> Result<Option<String>> {
+    match arg {
+        Some(value) if !value.is_undefined()? => optional_string_prop(value, name),
+        _ => Ok(None),
     }
 }
 
-#[cfg(windows)]
+fn optional_number_prop_of(arg: Option<JsValue>, name: &str) -> Result<Option<u64>> {
+    let Some(value) = arg
+    else {
+        return Ok(None);
+    };
+    if value.is_undefined()? {
+        return Ok(None);
+    }
+    match value.get_named(name) {
+        Ok(v) if !v.is_undefined()? && v.type_of()? == sys::napi_number => Ok(Some(v.as_i64()?.max(0) as u64)),
+        _ => Ok(None),
+    }
+}
+
+fn actor_from_js(arg: Option<JsValue>) -> Result<Actor> {
+    let mut actor = Actor::from_env();
+    let Some(value) = arg
+    else {
+        return Ok(actor);
+    };
+    if value.is_undefined()? {
+        return Ok(actor);
+    }
+    if let Some(kind) = optional_string_prop(value, "actorKind")? {
+        actor.kind = if kind.eq_ignore_ascii_case("agent") { ActorKind::Agent } else { ActorKind::User };
+    }
+    if let Some(id) = optional_string_prop(value, "actorId")?
+        && !id.trim().is_empty()
+    {
+        actor.id = id;
+    }
+    if let Some(source) = optional_string_prop(value, "actorSource")?
+        && !source.trim().is_empty()
+    {
+        actor.source = source;
+    }
+    Ok(actor)
+}
+
+fn query_from_js(arg: Option<JsValue>) -> Result<Query> {
+    Ok(Query {
+        actor_kind: optional_string_prop_of(arg, "actorKind")?
+            .map(|kind| if kind.eq_ignore_ascii_case("agent") { ActorKind::Agent } else { ActorKind::User }),
+        actor_id: optional_string_prop_of(arg, "actorId")?,
+        from_ms: optional_number_prop_of(arg, "fromMs")?,
+        to_ms: optional_number_prop_of(arg, "toMs")?,
+        capability: optional_string_prop_of(arg, "capability")?,
+        limit: optional_number_prop_of(arg, "limit")?.map(|limit| limit as usize),
+    })
+}
+
+fn query_from_value(value: Option<&Value>) -> Query {
+    let Some(value) = value
+    else {
+        return Query::default();
+    };
+    Query {
+        actor_kind: value
+            .get("actorKind")
+            .and_then(Value::as_str)
+            .map(|kind| if kind.eq_ignore_ascii_case("agent") { ActorKind::Agent } else { ActorKind::User }),
+        actor_id: value.get("actorId").and_then(Value::as_str).map(|id| id.to_string()),
+        from_ms: value.get("fromMs").and_then(Value::as_u64),
+        to_ms: value.get("toMs").and_then(Value::as_u64),
+        capability: value.get("capability").and_then(Value::as_str).map(|capability| capability.to_string()),
+        limit: value.get("limit").and_then(Value::as_u64).map(|limit| limit as usize),
+    }
+}
+
+fn json_to_js(env: Env, value: &Value) -> Result<JsValue> {
+    match value {
+        Value::Null => env.null(),
+        Value::Bool(flag) => env.boolean(*flag),
+        Value::Number(number) => match number.as_i64() {
+            Some(int) => env.int64(int),
+            None => env.double(number.as_f64().unwrap_or(0.0)),
+        },
+        Value::String(text) => env.string(text),
+        Value::Array(items) => {
+            let array = env.array_with_length(items.len())?;
+            for (index, item) in items.iter().enumerate() {
+                array.set_element(index as u32, json_to_js(env, item)?)?;
+            }
+            Ok(array)
+        }
+        Value::Object(map) => {
+            let object = env.object()?;
+            for (key, item) in map {
+                object.set_named(key, json_to_js(env, item)?)?;
+            }
+            Ok(object)
+        }
+    }
+}
+
 fn resolve_gui_dir() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("OPEN_CLEANER_GUI") {
         let path = PathBuf::from(p);
@@ -296,7 +485,18 @@ fn resolve_gui_dir() -> Result<PathBuf> {
         }
     }
 
-    Err(Error::new("dist/gui folder not found; pass contentDir to openGui()"))
+    Err(Error::new("dist/gui folder not found, pass contentDir to openGui()"))
 }
 
-register_module![scan_js, version, capabilities_js, registry_scan_js, open_gui, pump_events, close_gui, is_gui_open];
+register_module![
+    scan_js,
+    version,
+    capabilities_js,
+    registry_scan_js,
+    open_gui,
+    pump_events,
+    close_gui,
+    is_gui_open,
+    configure_audit_js,
+    audit_query_js
+];

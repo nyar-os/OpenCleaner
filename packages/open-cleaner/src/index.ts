@@ -1,6 +1,9 @@
 import {
     defaultGuiContentDir,
     loadNative,
+    type AuditConfigureOptions,
+    type AuditQueryOptions,
+    type AuditRecord,
     type Capabilities,
     type OpenGuiOptions,
     type RegistryOptions,
@@ -9,7 +12,21 @@ import {
     type ScanReport,
 } from './native.js';
 
-export type { Capabilities, OpenGuiOptions, RegistryEntry, RegistryOptions, RegistryReport, ScanEntry, ScanOptions, ScanReport } from './native.js';
+export type {
+    ActorKind,
+    AuditActor,
+    AuditConfigureOptions,
+    AuditQueryOptions,
+    AuditRecord,
+    Capabilities,
+    OpenGuiOptions,
+    RegistryEntry,
+    RegistryOptions,
+    RegistryReport,
+    ScanEntry,
+    ScanOptions,
+    ScanReport,
+} from './native.js';
 export { supportedPlatforms } from './native.js';
 
 export function scan(options: ScanOptions = {}): ScanReport {
@@ -53,6 +70,19 @@ export function closeGui(): void {
 
 export function isGuiOpen(): boolean {
     return loadNative().isGuiOpen();
+}
+
+/**
+ * Tag subsequent capability calls with an explicit actor. Without an override
+ * `WAE_ACTOR_KIND` / `WAE_ACTOR_ID` / `WAE_ACTOR_SOURCE` supply the identity.
+ */
+export function configureAudit(options: AuditConfigureOptions = {}): void {
+    loadNative().configureAudit(options);
+}
+
+/** Read the append-only capability history written by the shared auditor. */
+export function auditQuery(options: AuditQueryOptions = {}): AuditRecord[] {
+    return loadNative().auditQuery(options);
 }
 
 export function runGui(options: OpenGuiOptions = {}, intervalMs = 16): Promise<void> {

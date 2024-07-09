@@ -1,17 +1,24 @@
 {
     "cli": {
-        "intro": "Open Cleaner — scan disk usage and open an optional WebView2 GUI.",
+        "intro": "Open Cleaner — scan disk usage, inspect registry residue, and open the GUI.",
         "cmd": {
             "scan": "Scan a directory tree and print size entries",
             "capabilities": "Print platform capabilities as JSON",
             "registry": "Inspect Windows uninstall entries for broken install locations",
-            "gui": "Open the WebView2 GUI (Windows)",
+            "audit": "Print the append-only capability audit history as JSON lines",
+            "gui": "Open the GUI window",
             "version": "Print the package version"
         },
         "opt": {
             "root": "Directory to scan (default: system temp)",
             "limit": "Max entries to print",
-            "title": "GUI window title"
+            "title": "GUI window title",
+            "actorId": "Actor id recorded for every capability call (default: WAE_ACTOR_ID)",
+            "actorKind": "Actor kind: user or agent (default: WAE_ACTOR_KIND)",
+            "actorSource": "Actor entry point, for example cli, gui, plugin (default: cli)",
+            "actorFilter": "Only show records for this actor id",
+            "since": "Only show records at or after this Unix millisecond timestamp",
+            "capability": "Only show records for this capability name"
         }
     }
 }

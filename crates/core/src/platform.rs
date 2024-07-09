@@ -5,10 +5,7 @@
 //! missing capability must surface as [`Error::Capability`] rather than as an
 //! empty result or a substituted algorithm.
 
-use std::{
-    fs::Metadata,
-    path::Path,
-};
+use std::{fs::Metadata, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -67,43 +64,60 @@ pub struct Capabilities {
     pub env_path_scan: bool,
     pub env_path_clean: bool,
     pub software_scan: bool,
-    pub gui: bool,
     pub notes: Vec<String>,
 }
 
 pub fn capabilities() -> Capabilities {
-    let mut notes = Vec::new();
-    if cfg!(windows) {
-        notes.push("registry cleaning is not implemented in this build".to_string());
-    }
-    else {
-        let platform = name();
-        notes.push(format!("registry scanning is unavailable on {platform}"));
-        notes.push("WebView2 GUI is unavailable outside Windows".to_string());
-    }
-    if !cfg!(windows) {
-        notes.push("PATH edits are unavailable outside Windows".to_string());
-        notes.push("software residue scanning is unavailable outside Windows".to_string());
-    }
-    if !trash_available() {
-        notes.push(format!("recycle bin is unavailable on {}; deletions are permanent", name()));
-    }
-
-    Capabilities {
+    let mut capabilities = Capabilities {
         platform: name().to_string(),
         arch: arch().to_string(),
         file_scan: true,
         dev_scan: true,
         dev_clean: true,
         trash: trash_available(),
-        registry_scan: cfg!(windows),
+        registry_scan: registry_scan_available(),
         registry_clean: false,
         env_path_scan: false,
         env_path_clean: false,
         software_scan: false,
-        gui: cfg!(windows),
-        notes,
+        notes: Vec::new(),
+    };
+    capabilities.notes = domain_notes(&capabilities);
+    capabilities
+}
+
+/// Notes describe domain capability state only. They never mention an OS or a
+/// specific GUI toolkit, because the author surface must read the same shape on
+/// every supported build target.
+fn domain_notes(capabilities: &Capabilities) -> Vec<String> {
+    let mut notes = Vec::new();
+    if !capabilities.registry_scan {
+        notes.push("registry scanning is unavailable".to_string());
     }
+    if !capabilities.registry_clean {
+        notes.push("registry cleaning is not implemented in this build".to_string());
+    }
+    if !capabilities.env_path_scan || !capabilities.env_path_clean {
+        notes.push("PATH editing is not implemented in this build".to_string());
+    }
+    if !capabilities.software_scan {
+        notes.push("software residue scanning is not implemented in this build".to_string());
+    }
+    if !capabilities.trash {
+        notes.push("recycle bin is unavailable in this build, deletions are permanent".to_string());
+    }
+    notes
+}
+
+/// Whether registry inspection has an implementation for this build target.
+#[cfg(windows)]
+pub(crate) const fn registry_scan_available() -> bool {
+    true
+}
+
+#[cfg(not(windows))]
+pub(crate) const fn registry_scan_available() -> bool {
+    false
 }
 
 /// Recycle-bin availability for this build and OS.

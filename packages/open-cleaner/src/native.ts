@@ -58,6 +58,54 @@ export type OpenGuiOptions = {
     entryUrl?: string;
 };
 
+export type ActorKind = 'user' | 'agent';
+
+export type AuditActor = {
+    kind: ActorKind;
+    id: string;
+    source: string;
+};
+
+/** One append-only record from the shared `wae.audit/v0` history. */
+export type AuditRecord = {
+    schema: string;
+    timestampMs: number;
+    actor: AuditActor;
+    app: string;
+    appVersion: string;
+    capability: string;
+    mode: 'dry_run' | 'execute';
+    params: unknown;
+    targets: {
+        count: number;
+        summary: string;
+    };
+    result: 'success' | 'failure' | 'rejected';
+    errorCode?: string;
+    durationMs: number;
+    host: string;
+    session: string;
+};
+
+export type AuditConfigureOptions = {
+    actorKind?: ActorKind;
+    actorId?: string;
+    actorSource?: string;
+    session?: string;
+    host?: string;
+};
+
+export type AuditQueryOptions = {
+    actorKind?: ActorKind;
+    actorId?: string;
+    /** Inclusive lower bound, Unix milliseconds. */
+    fromMs?: number;
+    /** Inclusive upper bound, Unix milliseconds. */
+    toMs?: number;
+    capability?: string;
+    limit?: number;
+};
+
 type NativeBinding = {
     scan(options?: ScanOptions): ScanReport;
     capabilities(): Capabilities;
@@ -67,6 +115,8 @@ type NativeBinding = {
     pumpEvents(): boolean;
     closeGui(): void;
     isGuiOpen(): boolean;
+    configureAudit(options?: AuditConfigureOptions): void;
+    auditQuery(options?: AuditQueryOptions): AuditRecord[];
 };
 
 const require = createRequire(import.meta.url);
