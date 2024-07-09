@@ -10,7 +10,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{RegistryEntry, RegistryOptions, RegistryReport};
+use super::{
+    RegistryEntry, RegistryOptions, RegistryReport, RegistryResidueOptions, RegistryResidueReport,
+    analyze::{self, AnalyzeContext},
+    model::{RegistrySnapshot, RegistryValue, RegistryValueKind},
+};
 use crate::Result;
 
 type Hkey = *mut c_void;
@@ -23,6 +27,7 @@ const KEY_READ: u32 = 0x20019;
 const KEY_WOW64_64KEY: u32 = 0x0100;
 
 const ERROR_SUCCESS: Status = 0;
+const ERROR_MORE_DATA: Status = 234;
 const ERROR_NO_MORE_ITEMS: Status = 259;
 
 const REG_SZ: u32 = 1;
@@ -48,6 +53,16 @@ unsafe extern "system" {
     fn RegQueryValueExW(
         hkey: Hkey,
         lpvaluename: *const u16,
+        lpreserved: *mut u32,
+        lptype: *mut u32,
+        lpdata: *mut u8,
+        lpcbdata: *mut u32,
+    ) -> Status;
+    fn RegEnumValueW(
+        hkey: Hkey,
+        dwindex: u32,
+        lpvaluename: *mut u16,
+        lpcchvaluename: *mut u32,
         lpreserved: *mut u32,
         lptype: *mut u32,
         lpdata: *mut u8,
@@ -116,6 +131,33 @@ impl OwnedKey {
         data.truncate(size as usize);
         Some(RegValue { ty, data })
     }
+
+    /// Enumerate every value of this key. Names are read first, then each
+    /// value is queried by name so multi-segment data is not truncated.
+    fn values(&self) -> Vec<(String, RegValue)> {
+        let mut out = Vec::new();
+        let mut index = 0u32;
+        loop {
+            let mut name = vec![0u16; 512];
+            let mut name_len = name.len() as u32;
+            let mut ty = 0u32;
+            let mut size = 0u32;
+            // SAFETY: `self.0` is a live handle. `lpData` is NULL on purpose so
+            // the call only reports the value name and data size.
+            let status = unsafe {
+                RegEnumValueW(self.0, index, name.as_mut_ptr(), &mut name_len, std::ptr::null_mut(), &mut ty, std::ptr::null_mut(), &mut size)
+            };
+            if status != ERROR_SUCCESS && status != ERROR_MORE_DATA {
+                break;
+            }
+            let value_name = String::from_utf16_lossy(&name[..name_len as usize]);
+            if let Some(value) = self.value(&value_name) {
+                out.push((value_name, value));
+            }
+            index += 1;
+        }
+        out
+    }
 }
 
 impl Drop for OwnedKey {
@@ -157,6 +199,113 @@ fn dword_value(value: &RegValue) -> Option<u32> {
 
 fn hive_label(hive: Hkey) -> &'static str {
     if hive == HKEY_LOCAL_MACHINE { "HKLM" } else { "HKCU" }
+}
+
+fn map_value(value: &RegValue) -> RegistryValue {
+    match value.ty {
+        REG_SZ => RegistryValue { kind: RegistryValueKind::String, data: string_value(value).unwrap_or_default() },
+        REG_EXPAND_SZ => RegistryValue { kind: RegistryValueKind::ExpandString, data: string_value(value).unwrap_or_default() },
+        REG_DWORD => {
+            RegistryValue { kind: RegistryValueKind::Dword, data: dword_value(value).map(|flag| flag.to_string()).unwrap_or_default() }
+        }
+        _ => RegistryValue { kind: RegistryValueKind::Other, data: format!("reg-type-{}", value.ty) },
+    }
+}
+
+/// Copy one live key (values only) into the platform-neutral snapshot.
+fn record_key(snapshot: &mut RegistrySnapshot, hive: Hkey, label: &str, path: &str, sam: u32) {
+    let Some(key) = OwnedKey::open(hive, path, sam)
+    else {
+        return;
+    };
+    let full = format!("{label}\\{path}");
+    snapshot.insert(full.clone());
+    for (name, value) in key.values() {
+        snapshot.set_value(&full, &name, map_value(&value));
+    }
+}
+
+fn collect_class_associations(snapshot: &mut RegistrySnapshot, hive: Hkey, label: &str, sam: u32, root: &str) {
+    let Some(parent) = OwnedKey::open(hive, root, sam)
+    else {
+        return;
+    };
+    for name in parent.subkeys() {
+        record_key(snapshot, hive, label, &format!(r"{root}\{name}\shell\open\command"), sam);
+        if name.eq_ignore_ascii_case("Applications") || name.eq_ignore_ascii_case("SystemFileAssociations") {
+            let Some(container) = OwnedKey::open(hive, &format!(r"{root}\{name}"), sam)
+            else {
+                continue;
+            };
+            for child in container.subkeys() {
+                record_key(snapshot, hive, label, &format!(r"{root}\{name}\{child}\shell\open\command"), sam);
+            }
+        }
+    }
+}
+
+/// Capture only the keys the residue rules use. Reading the whole registry
+/// would be slow and unnecessary.
+pub(super) fn snapshot_registry() -> RegistrySnapshot {
+    let mut snapshot = RegistrySnapshot { source: "windows-registry".to_string(), keys: Vec::new(), warnings: Vec::new() };
+
+    for (hive, label, sam, root) in [
+        (HKEY_LOCAL_MACHINE, "HKLM", KEY_READ | KEY_WOW64_64KEY, UNINSTALL),
+        (HKEY_LOCAL_MACHINE, "HKLM", KEY_READ | KEY_WOW64_64KEY, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (HKEY_CURRENT_USER, "HKCU", KEY_READ, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ] {
+        let Some(parent) = OwnedKey::open(hive, root, sam)
+        else {
+            continue;
+        };
+        for name in parent.subkeys() {
+            record_key(&mut snapshot, hive, label, &format!(r"{root}\{name}"), sam);
+        }
+    }
+
+    for (hive, label, sam, root) in [
+        (HKEY_CURRENT_USER, "HKCU", KEY_READ, r"Software\Classes"),
+        (HKEY_LOCAL_MACHINE, "HKLM", KEY_READ | KEY_WOW64_64KEY, r"SOFTWARE\Classes"),
+    ] {
+        collect_class_associations(&mut snapshot, hive, label, sam, root);
+    }
+
+    for (hive, label, sam, root) in [
+        (HKEY_CURRENT_USER, "HKCU", KEY_READ, r"Software\Microsoft\Windows\CurrentVersion"),
+        (HKEY_LOCAL_MACHINE, "HKLM", KEY_READ | KEY_WOW64_64KEY, r"SOFTWARE\Microsoft\Windows\CurrentVersion"),
+        (HKEY_LOCAL_MACHINE, "HKLM", KEY_READ | KEY_WOW64_64KEY, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion"),
+    ] {
+        for suffix in ["Run", "RunOnce"] {
+            record_key(&mut snapshot, hive, label, &format!(r"{root}\{suffix}"), sam);
+        }
+    }
+
+    snapshot
+}
+
+pub(super) fn residue_scan(options: RegistryResidueOptions) -> Result<RegistryResidueReport> {
+    let snapshot = snapshot_registry();
+    let exists = |path: &Path| path.exists();
+    let env = |name: &str| std::env::var(name).ok();
+    let ctx = AnalyzeContext { exists: &exists, env: &env };
+    let mut findings = analyze::analyze(&snapshot, &ctx);
+
+    let available = findings.len();
+    let limit = options.limit.unwrap_or(0);
+    let mut warnings = snapshot.warnings.clone();
+    if limit > 0 && findings.len() > limit {
+        findings.truncate(limit);
+        warnings.push(format!("{available} findings found; showing the first {limit}"));
+    }
+
+    Ok(RegistryResidueReport {
+        platform: crate::platform::name().to_string(),
+        source: snapshot.source,
+        scanned_keys: snapshot.keys.len(),
+        findings,
+        warnings,
+        scanned_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+    })
 }
 
 pub(super) fn scan(options: RegistryOptions) -> Result<RegistryReport> {

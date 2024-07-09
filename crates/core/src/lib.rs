@@ -8,19 +8,22 @@
 //!   `unsupported_platform` / `not_implemented` / `dependency_blocked` code.
 //!   They never degrade silently into an empty result.
 
-mod error;
 pub mod dev;
+mod error;
 pub mod locations;
 pub mod platform;
 pub mod registry;
 pub mod scan;
 
 pub use dev::{
-    CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevPlan, DevPlanItem, DevScanOptions,
-    DevScanReport, RiskLevel, SkipReason, dev_clean, dev_plan, dev_scan,
+    CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevPlan, DevPlanItem, DevScanOptions, DevScanReport,
+    RiskLevel, SkipReason, dev_clean, dev_plan, dev_scan,
 };
 pub use error::{CapabilityState, Error, Result, capability_code};
 pub use locations::{BaseDirs, base_dirs};
 pub use platform::{Capabilities, Platform, capabilities};
-pub use registry::{RegistryEntry, RegistryOptions, RegistryReport, registry_scan};
+pub use registry::{
+    RegistryEntry, RegistryFinding, RegistryOptions, RegistryReport, RegistryResidueOptions, RegistryResidueReport, ResidueKind,
+    registry_residue_scan, registry_scan,
+};
 pub use scan::{ScanEntry, ScanOptions, ScanReport, default_scan_root, scan};
