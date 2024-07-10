@@ -40,10 +40,17 @@ await runGui({ title: 'Open Cleaner' });
 pnpm --filter @wae/open-cleaner exec node ./dist/cli.js scan --limit 5
 pnpm --filter @wae/open-cleaner exec node ./dist/cli.js capabilities
 pnpm --filter @wae/open-cleaner exec node ./dist/cli.js registry --limit 5
-pnpm --filter @wae/open-cleaner exec node ./dist/cli.js --help
+pnpm --filter @wae/open-cleaner exec node ./dist/cli.js audit --actor agent-1 --capability scan --limit 20
+pnpm --filter @wae/open-cleaner exec node ./dist/cli.js audit --help
 ```
 
-Platform support: file and disk scanning is portable. Windows registry inspection and the
-WebView2 GUI are Windows-only. Registry cleaning is not implemented in this build, so
-`capabilities().registryClean` is `false` everywhere. Cross-target staging uses
+Actor attribution for every capability call comes from `--actor-id`, `--actor-kind` and
+`--actor-source`, or from `WAE_ACTOR_ID` / `WAE_ACTOR_KIND` / `WAE_ACTOR_SOURCE`. Records use
+the shared `wae.audit/v0` JSONL schema, land under `WAE_AUDIT_DIR` (or the platform state
+directory), and rotate by size. The GUI reads the same history through its `audit` IPC message.
+
+Platform support: file and disk scanning is portable. Windows registry inspection is
+Windows-only and fails with a structured `Unsupported` error elsewhere. The GUI host comes from
+the `wae` facade and builds for Windows, macOS and Linux. Registry cleaning is not implemented in
+this build, so `capabilities().registryClean` is `false` everywhere. Cross-target staging uses
 `OPEN_CLEANER_TARGET=<rust-triple> pnpm run stage:native`.
