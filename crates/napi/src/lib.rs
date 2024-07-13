@@ -65,7 +65,7 @@ impl IpcHandler for ScanIpcHandler {
             "audit" => {
                 let id = value.get("id").cloned().unwrap_or(Value::Null);
                 let filter = query_from_value(Some(&value));
-                match audit::query(&filter) {
+                match audited_audit_query(&filter) {
                     Ok(entries) => {
                         let reply = json!({ "type": "auditResult", "id": id, "entries": entries });
                         IpcOutcome::ReplyToPage(reply.to_string())
@@ -102,6 +102,15 @@ fn audited_scan(options: ScanOptions) -> Result<open_cleaner_core::ScanReport> {
     })
     .map_err(core_error)?;
     Ok(report)
+}
+
+fn audited_audit_query(filter: &Query) -> Result<Vec<wae::audit::Entry>> {
+    audit::run("audit-query", Mode::DryRun, query_params(filter), || {
+        let entries = audit::query(filter).map_err(|error| CoreError::Message(error.to_string()))?;
+        let count = entries.len() as u64;
+        Ok((entries, audit::Summary::new(count, format!("{count} audit records"))))
+    })
+    .map_err(core_error)
 }
 
 fn scan_options_from_js(arg: Option<JsValue>) -> Result<ScanOptions> {
@@ -340,12 +349,7 @@ fn configure_audit_js(ctx: CallContext) -> Result<JsValue> {
 #[function(js_name = "auditQuery")]
 fn audit_query_js(ctx: CallContext) -> Result<JsValue> {
     let filter = query_from_js(ctx.arg(0).ok())?;
-    let params = query_params(&filter);
-    let entries = audit::run("audit-query", Mode::DryRun, params, || {
-        let entries = audit::query(&filter).map_err(|error| CoreError::Message(error.to_string()))?;
-        Ok((entries, audit::Summary::new(0, "audit history queried")))
-    })
-    .map_err(core_error)?;
+    let entries = audited_audit_query(&filter)?;
     json_to_js(ctx.env(), &serde_json::to_value(&entries).unwrap_or(Value::Null))
 }
 
