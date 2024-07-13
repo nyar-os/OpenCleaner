@@ -9,6 +9,7 @@
 //!   They never degrade silently into an empty result.
 
 pub mod dev;
+pub mod env;
 mod error;
 pub mod locations;
 pub mod platform;
@@ -18,6 +19,10 @@ pub mod scan;
 pub use dev::{
     CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevPlan, DevPlanItem, DevScanOptions, DevScanReport,
     RiskLevel, SkipReason, dev_clean, dev_plan, dev_scan,
+};
+pub use env::{
+    EnvPathBackup, EnvPathCleanItem, EnvPathCleanOptions, EnvPathCleanReport, EnvPathCleanStatus, EnvPathEntry, EnvPathOptions, EnvPathReport,
+    EnvPathScopeReport, EnvPathSelection, PathIssue, PathScope, env_path_clean, env_path_scan,
 };
 pub use error::{CapabilityState, Error, Result, capability_code};
 pub use locations::{BaseDirs, base_dirs};

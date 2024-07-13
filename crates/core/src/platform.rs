@@ -77,8 +77,8 @@ pub fn capabilities() -> Capabilities {
         trash: trash_available(),
         registry_scan: registry_scan_available(),
         registry_clean: false,
-        env_path_scan: false,
-        env_path_clean: false,
+        env_path_scan: env_path_available(),
+        env_path_clean: env_path_available(),
         software_scan: false,
         notes: Vec::new(),
     };
@@ -117,6 +117,17 @@ pub(crate) const fn registry_scan_available() -> bool {
 
 #[cfg(not(windows))]
 pub(crate) const fn registry_scan_available() -> bool {
+    false
+}
+
+/// Whether PATH inspection and editing are implemented for this build target.
+#[cfg(windows)]
+pub(crate) const fn env_path_available() -> bool {
+    true
+}
+
+#[cfg(not(windows))]
+pub(crate) const fn env_path_available() -> bool {
     false
 }
 

@@ -43,6 +43,8 @@ pub struct RegistryReport {
 }
 
 #[cfg(windows)]
+pub(crate) mod win32;
+#[cfg(windows)]
 mod windows;
 
 pub fn registry_scan(options: RegistryOptions) -> Result<RegistryReport> {
