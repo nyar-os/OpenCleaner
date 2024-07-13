@@ -15,6 +15,7 @@ pub mod locations;
 pub mod platform;
 pub mod registry;
 pub mod scan;
+pub mod software;
 
 pub use dev::{
     CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevPlan, DevPlanItem, DevScanOptions, DevScanReport,
@@ -32,3 +33,4 @@ pub use registry::{
     registry_residue_scan, registry_scan,
 };
 pub use scan::{ScanEntry, ScanOptions, ScanReport, default_scan_root, scan};
+pub use software::{SoftwareFinding, SoftwareKind, SoftwareOptions, SoftwareReport, SoftwareSkip, software_residue_scan};

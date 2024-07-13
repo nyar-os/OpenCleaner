@@ -79,7 +79,7 @@ pub fn capabilities() -> Capabilities {
         registry_clean: false,
         env_path_scan: env_path_available(),
         env_path_clean: env_path_available(),
-        software_scan: false,
+        software_scan: software_available(),
         notes: Vec::new(),
     };
     capabilities.notes = domain_notes(&capabilities);
@@ -128,6 +128,17 @@ pub(crate) const fn env_path_available() -> bool {
 
 #[cfg(not(windows))]
 pub(crate) const fn env_path_available() -> bool {
+    false
+}
+
+/// Whether software-residue scanning is implemented for this build target.
+#[cfg(windows)]
+pub(crate) const fn software_available() -> bool {
+    true
+}
+
+#[cfg(not(windows))]
+pub(crate) const fn software_available() -> bool {
     false
 }
 

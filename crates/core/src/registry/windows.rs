@@ -52,7 +52,7 @@ fn collect_class_associations(snapshot: &mut RegistrySnapshot, hive: super::win3
 
 /// Capture only the keys the residue rules use. Reading the whole registry
 /// would be slow and unnecessary.
-pub(super) fn snapshot_registry() -> RegistrySnapshot {
+pub(crate) fn snapshot_registry() -> RegistrySnapshot {
     let mut snapshot = RegistrySnapshot { source: "windows-registry".to_string(), keys: Vec::new(), warnings: Vec::new() };
 
     for (hive, label, sam, root) in [
