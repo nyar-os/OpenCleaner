@@ -16,6 +16,7 @@ use crate::{Result, platform};
 pub(super) fn scan(options: SoftwareOptions) -> Result<SoftwareReport> {
     let snapshot = crate::registry::windows::snapshot_registry();
     let dir_exists = |path: &str| Path::new(path).is_dir();
+    let file_exists = |path: &str| Path::new(path).is_file();
     let list_dir = |path: &str| {
         let read = fs::read_dir(path);
         read.map(|entries| {
@@ -29,7 +30,7 @@ pub(super) fn scan(options: SoftwareOptions) -> Result<SoftwareReport> {
     };
     let dir_size = |path: &str| size_of(Path::new(path));
     let env = |name: &str| std::env::var(name).ok();
-    let ctx = SoftwareContext { dir_exists: &dir_exists, list_dir: &list_dir, dir_size: &dir_size, env: &env };
+    let ctx = SoftwareContext { dir_exists: &dir_exists, file_exists: &file_exists, list_dir: &list_dir, dir_size: &dir_size, env: &env };
 
     let analysis = analyze::analyze(&snapshot, &ctx);
     let mut findings = analysis.findings;

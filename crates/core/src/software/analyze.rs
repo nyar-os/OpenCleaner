@@ -55,6 +55,7 @@ pub struct SoftwareSkip {
 
 pub struct SoftwareContext<'a> {
     pub dir_exists: &'a dyn Fn(&str) -> bool,
+    pub file_exists: &'a dyn Fn(&str) -> bool,
     pub list_dir: &'a dyn Fn(&str) -> Vec<String>,
     pub dir_size: &'a dyn Fn(&str) -> u64,
     pub env: &'a dyn Fn(&str) -> Option<String>,
@@ -181,6 +182,18 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
             continue;
         }
 
+        // An uninstaller or display icon that still exists proves the product is
+        // present. Without this guard, a live install whose uninstall row omits
+        // `InstallLocation` (Steam and some MSI rows do) would look like leftover.
+        if still_installed(&key.values, ctx) {
+            analysis.skipped.push(SoftwareSkip {
+                registry_key: key.path.clone(),
+                display_name: Some(display_name),
+                reason: "still-installed".to_string(),
+            });
+            continue;
+        }
+
         let product = normalize_name(&display_name);
         let mut candidates: Vec<(SoftwareKind, String, String)> = Vec::new();
 
@@ -293,6 +306,44 @@ fn normalize_name(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase()
 }
 
+/// A product is still installed when its uninstaller or display icon exists on
+/// disk, even if `InstallLocation` is absent or stale.
+fn still_installed(values: &std::collections::BTreeMap<String, RegistryValue>, ctx: &SoftwareContext<'_>) -> bool {
+    for name in ["UninstallString", "QuietUninstallString", "DisplayIcon"] {
+        let Some(raw) = value(values, name)
+        else {
+            continue;
+        };
+        let Some(path) = executable_path(&raw, ctx.env)
+        else {
+            continue;
+        };
+        if (ctx.file_exists)(&path) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Extract the executable path from a registry command line such as
+/// `"C:\App\uninstall.exe" /S` or `C:\App\app.exe,0`.
+fn executable_path(raw: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let raw = raw.trim();
+    let target = if let Some(rest) = raw.strip_prefix('"') {
+        rest.split('"').next().unwrap_or(rest)
+    }
+    else if let Some(index) = raw.to_ascii_lowercase().find(".exe") {
+        &raw[..index + 4]
+    }
+    else {
+        raw.split_whitespace().next().unwrap_or(raw)
+    };
+    let target = target.split(',').next().unwrap_or(target).trim();
+    let expanded = expand_env(target, env)?;
+    let expanded = expanded.trim().trim_matches('"').trim().to_string();
+    (!expanded.is_empty()).then_some(expanded)
+}
+
 fn parent_of(path: &str) -> Option<String> {
     let trimmed = path.trim_end_matches(['\\', '/']);
     let index = trimmed.rfind(['\\', '/'])?;
@@ -346,12 +397,17 @@ mod tests {
 [HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\DocsApp]
 "DisplayName"="Docs App"
 
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\SteamLike]
+"DisplayName"="Steam Like"
+"UninstallString"="\"C:\\Program Files (x86)\\Steam Like\\steam.exe\" --uninstall"
+
 [HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NoName]
 "InstallLocation"="C:\\Program Files\\No Name"
 "#;
 
     struct Fixture {
         dirs: Vec<String>,
+        files: Vec<String>,
         children: BTreeMap<String, Vec<String>>,
         env: BTreeMap<String, String>,
     }
@@ -359,10 +415,12 @@ mod tests {
     impl Fixture {
         fn analyze(&self, snapshot: &RegistrySnapshot) -> SoftwareAnalysis {
             let dir_exists = |path: &str| self.dirs.iter().any(|dir| dir == &crate::env::analyze::normalize(path));
+            let file_exists = |path: &str| self.files.iter().any(|file| file == &crate::env::analyze::normalize(path));
             let list_dir = |path: &str| self.children.get(&crate::env::analyze::normalize(path)).cloned().unwrap_or_default();
             let dir_size = |_: &str| 4096u64;
             let env = |name: &str| self.env.get(name).cloned();
-            let ctx = SoftwareContext { dir_exists: &dir_exists, list_dir: &list_dir, dir_size: &dir_size, env: &env };
+            let ctx =
+                SoftwareContext { dir_exists: &dir_exists, file_exists: &file_exists, list_dir: &list_dir, dir_size: &dir_size, env: &env };
             super::analyze(snapshot, &ctx)
         }
     }
@@ -374,6 +432,7 @@ mod tests {
     fn fixture() -> Fixture {
         let mut children = BTreeMap::new();
         children.insert(normalized(r"C:\Program Files"), vec!["Gone App".to_string(), "Live App".to_string()]);
+        children.insert(normalized(r"C:\Program Files (x86)"), vec!["Steam Like".to_string()]);
         children.insert(
             normalized(r"C:\ProgramData"),
             vec!["Config App".to_string(), "Ghost App".to_string(), "System App".to_string(), "Patch App".to_string()],
@@ -392,6 +451,8 @@ mod tests {
             dirs: vec![
                 normalized(r"C:\Program Files"),
                 normalized(r"C:\Program Files\Live App"),
+                normalized(r"C:\Program Files (x86)"),
+                normalized(r"C:\Program Files (x86)\Steam Like"),
                 normalized(r"C:\ProgramData"),
                 normalized(r"C:\ProgramData\Config App"),
                 normalized(r"C:\ProgramData\Ghost App"),
@@ -403,6 +464,7 @@ mod tests {
                 normalized(r"C:\Users\me\Documents"),
                 normalized(r"C:\Users\me\Documents\Docs App"),
             ],
+            files: vec![normalized(r"C:\Program Files (x86)\Steam Like\steam.exe")],
             children,
             env,
         }
@@ -427,7 +489,7 @@ mod tests {
             assert_eq!(finding.bytes, 4096);
             assert!(finding.removable);
         }
-        assert_eq!(analysis.uninstall_keys, 7);
+        assert_eq!(analysis.uninstall_keys, 8);
     }
 
     #[test]
@@ -438,6 +500,7 @@ mod tests {
 
         let paths: Vec<&str> = analysis.findings.iter().map(|finding| finding.path.as_str()).collect();
         assert!(!paths.iter().any(|path| path.ends_with(r"Program Files\Live App")), "{paths:?}");
+        assert!(!paths.iter().any(|path| path.ends_with(r"Program Files (x86)\Steam Like")), "{paths:?}");
         assert!(!paths.iter().any(|path| path.ends_with(r"ProgramData\System App")), "{paths:?}");
         assert!(!paths.iter().any(|path| path.ends_with(r"ProgramData\Patch App")), "{paths:?}");
 
@@ -446,6 +509,13 @@ mod tests {
         assert!(reasons.contains(&"system-component"), "{reasons:?}");
         assert!(reasons.contains(&"update-package"), "{reasons:?}");
         assert!(reasons.contains(&"no-display-name"), "{reasons:?}");
+        // A live uninstaller proves the product is still installed even when
+        // `InstallLocation` is absent from the uninstall row.
+        assert!(
+            analysis.skipped.iter().any(|skip| skip.reason == "still-installed" && skip.display_name.as_deref() == Some("Steam Like")),
+            "{:#?}",
+            analysis.skipped
+        );
     }
 
     #[test]
@@ -459,7 +529,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("LOCALAPPDATA".to_string(), r"C:\Users\me\Documents".to_string());
         env.insert("USERPROFILE".to_string(), r"C:\Users\me".to_string());
-        let fixture = Fixture { dirs: vec![normalized(r"C:\Users\me\Documents")], children, env };
+        let fixture = Fixture { dirs: vec![normalized(r"C:\Users\me\Documents")], files: Vec::new(), children, env };
 
         let analysis = fixture.analyze(&snapshot);
         let paths: Vec<&str> = analysis.findings.iter().map(|finding| finding.path.as_str()).collect();
@@ -480,9 +550,9 @@ mod tests {
     #[test]
     fn empty_install_roots_fall_back_to_no_candidates() {
         let snapshot = parse_reg(REG_FIXTURE, "fixture.reg");
-        let fixture = Fixture { dirs: Vec::new(), children: BTreeMap::new(), env: BTreeMap::new() };
+        let fixture = Fixture { dirs: Vec::new(), files: Vec::new(), children: BTreeMap::new(), env: BTreeMap::new() };
         let analysis = fixture.analyze(&snapshot);
         assert!(analysis.findings.is_empty(), "{:#?}", analysis.findings);
-        assert_eq!(analysis.uninstall_keys, 7);
+        assert_eq!(analysis.uninstall_keys, 8);
     }
 }
