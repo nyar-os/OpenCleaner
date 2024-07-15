@@ -12,7 +12,12 @@ mod audit;
 
 use std::{cell::RefCell, path::PathBuf};
 
-use open_cleaner_core::{CapabilityState, Error as CoreError, RegistryOptions, ScanOptions, capabilities, registry_scan, scan};
+use open_cleaner_core::{
+    CapabilityState, DeleteMode, DevCleanOptions, DevScanOptions, EnvPathCleanOptions, EnvPathOptions, Error as CoreError, RegistryOptions,
+    RegistryResidueOptions, ScanOptions, SoftwareOptions, capabilities, dev_clean, dev_plan, dev_scan, env_path_clean, env_path_scan,
+    registry_residue_scan, registry_scan, scan, software_residue_scan,
+};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use wae::{
     CallContext, Env, Error, JsValue, Result,
@@ -76,6 +81,42 @@ impl IpcHandler for ScanIpcHandler {
                     }
                 }
             }
+            "devScan" => ipc_reply(value.get("id"), "devScanResult", "devScanError", || {
+                let options: DevScanOptions = parse_options(value.get("options"))?;
+                let params = value.get("options").cloned().unwrap_or(Value::Null);
+                report_json(&audited_dev_scan(options, params)?)
+            }),
+            "devPlan" => ipc_reply(value.get("id"), "devPlanResult", "devPlanError", || {
+                let options: DevScanOptions = parse_options(value.get("options"))?;
+                let mode = delete_mode(value.get("mode").and_then(Value::as_str))?;
+                let params = json!({ "options": value.get("options").cloned().unwrap_or(Value::Null), "mode": mode });
+                report_json(&audited_dev_plan(options, mode, params)?)
+            }),
+            "devClean" => ipc_reply(value.get("id"), "devCleanResult", "devCleanError", || {
+                let options: DevCleanOptions = require_options(value.get("options"), "devClean")?;
+                let params = value.get("options").cloned().unwrap_or(Value::Null);
+                report_json(&audited_dev_clean(options, params)?)
+            }),
+            "registryResidue" => ipc_reply(value.get("id"), "registryResidueResult", "registryResidueError", || {
+                let options: RegistryResidueOptions = parse_options(value.get("options"))?;
+                let params = value.get("options").cloned().unwrap_or(Value::Null);
+                report_json(&audited_registry_residue(options, params)?)
+            }),
+            "envPathScan" => ipc_reply(value.get("id"), "envPathScanResult", "envPathScanError", || {
+                let options: EnvPathOptions = parse_options(value.get("options"))?;
+                let params = value.get("options").cloned().unwrap_or(Value::Null);
+                report_json(&audited_env_path_scan(options, params)?)
+            }),
+            "envPathClean" => ipc_reply(value.get("id"), "envPathCleanResult", "envPathCleanError", || {
+                let options: EnvPathCleanOptions = require_options(value.get("options"), "envPathClean")?;
+                let params = value.get("options").cloned().unwrap_or(Value::Null);
+                report_json(&audited_env_path_clean(options, params)?)
+            }),
+            "softwareResidue" => ipc_reply(value.get("id"), "softwareResidueResult", "softwareResidueError", || {
+                let options: SoftwareOptions = parse_options(value.get("options"))?;
+                let params = value.get("options").cloned().unwrap_or(Value::Null);
+                report_json(&audited_software_residue(options, params)?)
+            }),
             _ => IpcOutcome::Ignored,
         }
     }
@@ -175,8 +216,14 @@ fn capabilities_js(ctx: CallContext) -> Result<JsValue> {
     obj.set_named("platform", env.string(&caps.platform)?)?;
     obj.set_named("arch", env.string(&caps.arch)?)?;
     obj.set_named("fileScan", env.boolean(caps.file_scan)?)?;
+    obj.set_named("devScan", env.boolean(caps.dev_scan)?)?;
+    obj.set_named("devClean", env.boolean(caps.dev_clean)?)?;
+    obj.set_named("trash", env.boolean(caps.trash)?)?;
     obj.set_named("registryScan", env.boolean(caps.registry_scan)?)?;
     obj.set_named("registryClean", env.boolean(caps.registry_clean)?)?;
+    obj.set_named("envPathScan", env.boolean(caps.env_path_scan)?)?;
+    obj.set_named("envPathClean", env.boolean(caps.env_path_clean)?)?;
+    obj.set_named("softwareScan", env.boolean(caps.software_scan)?)?;
     // The GUI host is provided by the `wae` facade, which compiles for every
     // target this crate supports. Availability is still confirmed per call by
     // the structured `Unsupported` error returned from `openGui`.
@@ -243,6 +290,69 @@ fn registry_scan_js(ctx: CallContext) -> Result<JsValue> {
     })
     .map_err(core_error)?;
     registry_report_to_js(ctx.env(), &report)
+}
+
+/// Dry-run scan for developer artifacts. Options are a JSON string because the
+/// author surface carries arrays (`roots`) that the N-API value helpers do not
+/// expose.
+#[function(js_name = "devScan")]
+fn dev_scan_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: DevScanOptions = parse_options(raw.as_ref())?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_dev_scan(options, params)?)
+}
+
+#[function(js_name = "devPlan")]
+fn dev_plan_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: DevScanOptions = parse_options(raw.as_ref())?;
+    let mode = match ctx.arg(1) {
+        Ok(value) if !value.is_undefined()? => delete_mode(Some(value.as_string()?.as_str()))?,
+        _ => delete_mode(None)?,
+    };
+    let params = json!({ "options": raw.unwrap_or(Value::Null), "mode": mode });
+    report_value_to_js(ctx.env(), &audited_dev_plan(options, mode, params)?)
+}
+
+#[function(js_name = "devClean")]
+fn dev_clean_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: DevCleanOptions = require_options(raw.as_ref(), "devClean")?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_dev_clean(options, params)?)
+}
+
+#[function(js_name = "registryResidueScan")]
+fn registry_residue_scan_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: RegistryResidueOptions = parse_options(raw.as_ref())?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_registry_residue(options, params)?)
+}
+
+#[function(js_name = "envPathScan")]
+fn env_path_scan_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: EnvPathOptions = parse_options(raw.as_ref())?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_env_path_scan(options, params)?)
+}
+
+#[function(js_name = "envPathClean")]
+fn env_path_clean_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: EnvPathCleanOptions = require_options(raw.as_ref(), "envPathClean")?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_env_path_clean(options, params)?)
+}
+
+#[function(js_name = "softwareResidueScan")]
+fn software_residue_scan_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: SoftwareOptions = parse_options(raw.as_ref())?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_software_residue(options, params)?)
 }
 
 #[function(js_name = "openGui")]
@@ -467,6 +577,175 @@ fn json_to_js(env: Env, value: &Value) -> Result<JsValue> {
     }
 }
 
+fn json_string_arg(ctx: &CallContext, index: usize) -> Result<Option<Value>> {
+    let Ok(value) = ctx.arg(index)
+    else {
+        return Ok(None);
+    };
+    if value.is_undefined()? || value.type_of()? != sys::napi_string {
+        return Ok(None);
+    }
+    let text = value.as_string()?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(&text).map(Some).map_err(|error| Error::new(format!("invalid JSON options: {error}")))
+}
+
+fn parse_options<T: DeserializeOwned + Default>(raw: Option<&Value>) -> Result<T> {
+    match raw {
+        Some(value) if !value.is_null() => {
+            serde_json::from_value(rename_keys(value, snake_case_key)).map_err(|error| Error::new(format!("invalid options: {error}")))
+        }
+        _ => Ok(T::default()),
+    }
+}
+
+fn require_options<T: DeserializeOwned>(raw: Option<&Value>, what: &str) -> Result<T> {
+    let Some(value) = raw.filter(|value| !value.is_null())
+    else {
+        return Err(Error::new(format!("{what} requires an options JSON argument")));
+    };
+    serde_json::from_value(rename_keys(value, snake_case_key)).map_err(|error| Error::new(format!("invalid options: {error}")))
+}
+
+fn delete_mode(mode: Option<&str>) -> Result<DeleteMode> {
+    match mode {
+        None | Some("trash") => Ok(DeleteMode::Trash),
+        Some("permanent") => Ok(DeleteMode::Permanent),
+        Some(other) => Err(Error::new(format!("unknown delete mode `{other}`, expected `trash` or `permanent`"))),
+    }
+}
+
+fn report_value_to_js<T: Serialize>(env: Env, report: &T) -> Result<JsValue> {
+    let value = serde_json::to_value(report).map_err(|error| Error::new(error.to_string()))?;
+    json_to_js(env, &rename_keys(&value, camel_case_key))
+}
+
+fn ipc_reply(id: Option<&Value>, ok_type: &str, err_type: &str, body: impl FnOnce() -> Result<Value>) -> IpcOutcome {
+    let id = id.cloned().unwrap_or(Value::Null);
+    match body() {
+        Ok(report) => IpcOutcome::ReplyToPage(json!({ "type": ok_type, "id": id, "report": report }).to_string()),
+        Err(error) => IpcOutcome::ReplyToPage(json!({ "type": err_type, "id": id, "message": error.to_string() }).to_string()),
+    }
+}
+
+fn report_json<T: Serialize>(report: &T) -> Result<Value> {
+    let value = serde_json::to_value(report).map_err(|error| Error::new(error.to_string()))?;
+    Ok(rename_keys(&value, camel_case_key))
+}
+
+fn rename_keys(value: &Value, rename: fn(&str) -> String) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(|item| rename_keys(item, rename)).collect()),
+        Value::Object(map) => Value::Object(map.iter().map(|(key, item)| (rename(key), rename_keys(item, rename))).collect()),
+        other => other.clone(),
+    }
+}
+
+fn camel_case_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let mut upper = false;
+    for ch in key.chars() {
+        if ch == '_' {
+            upper = true;
+            continue;
+        }
+        if upper {
+            out.extend(ch.to_uppercase());
+            upper = false;
+        }
+        else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn snake_case_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    for ch in key.chars() {
+        if ch.is_ascii_uppercase() {
+            out.push('_');
+            out.push(ch.to_ascii_lowercase());
+        }
+        else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn audited_dev_scan(options: DevScanOptions, params: Value) -> Result<open_cleaner_core::DevScanReport> {
+    audit::run("dev-scan", Mode::DryRun, params, || {
+        let report = dev_scan(options)?;
+        let count = report.artifacts.len() as u64;
+        let summary = format!("{count} artifacts across {} projects", report.scanned_projects);
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)
+}
+
+fn audited_dev_plan(options: DevScanOptions, mode: DeleteMode, params: Value) -> Result<open_cleaner_core::DevPlan> {
+    audit::run("dev-plan", Mode::DryRun, params, || {
+        let plan = dev_plan(options, mode)?;
+        let removable = plan.items.iter().filter(|item| item.removable).count() as u64;
+        let summary = format!("{removable} of {} removable, {} bytes", plan.items.len(), plan.removable_bytes);
+        Ok((plan, audit::Summary::new(removable, summary)))
+    })
+    .map_err(core_error)
+}
+
+fn audited_dev_clean(options: DevCleanOptions, params: Value) -> Result<open_cleaner_core::DevCleanReport> {
+    audit::run("dev-clean", Mode::Execute, params, || {
+        let report = dev_clean(options)?;
+        let count = report.items.len() as u64;
+        let summary = format!("{count} items, {} bytes freed", report.freed_bytes);
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)
+}
+
+fn audited_registry_residue(options: RegistryResidueOptions, params: Value) -> Result<open_cleaner_core::RegistryResidueReport> {
+    audit::run("registry-residue-scan", Mode::DryRun, params, || {
+        let report = registry_residue_scan(options)?;
+        let count = report.findings.len() as u64;
+        let summary = format!("{count} residue findings out of {} keys", report.scanned_keys);
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)
+}
+
+fn audited_env_path_scan(options: EnvPathOptions, params: Value) -> Result<open_cleaner_core::EnvPathReport> {
+    audit::run("env-path-scan", Mode::DryRun, params, || {
+        let report = env_path_scan(options)?;
+        let issues: usize = report.scopes.iter().map(|scope| scope.issues).sum();
+        let summary = format!("{issues} PATH issues across {} scopes", report.scopes.len());
+        Ok((report, audit::Summary::new(issues as u64, summary)))
+    })
+    .map_err(core_error)
+}
+
+fn audited_env_path_clean(options: EnvPathCleanOptions, params: Value) -> Result<open_cleaner_core::EnvPathCleanReport> {
+    audit::run("env-path-clean", Mode::Execute, params, || {
+        let report = env_path_clean(options)?;
+        let count = report.items.len() as u64;
+        let summary = format!("{} entries removed, backup written", report.removed);
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)
+}
+
+fn audited_software_residue(options: SoftwareOptions, params: Value) -> Result<open_cleaner_core::SoftwareReport> {
+    audit::run("software-residue-scan", Mode::DryRun, params, || {
+        let report = software_residue_scan(options)?;
+        let count = report.findings.len() as u64;
+        let summary = format!("{count} candidates from {} uninstall keys", report.uninstall_keys);
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)
+}
+
 fn resolve_gui_dir() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("OPEN_CLEANER_GUI") {
         let path = PathBuf::from(p);
@@ -497,6 +776,13 @@ register_module![
     version,
     capabilities_js,
     registry_scan_js,
+    dev_scan_js,
+    dev_plan_js,
+    dev_clean_js,
+    registry_residue_scan_js,
+    env_path_scan_js,
+    env_path_clean_js,
+    software_residue_scan_js,
     open_gui,
     pump_events,
     close_gui,
