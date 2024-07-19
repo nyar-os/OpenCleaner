@@ -32,9 +32,8 @@ pub fn base_dirs() -> BaseDirs {
 
 /// Resolve base directories for an explicit platform and environment.
 pub fn resolve_dirs(platform: Platform, env: impl Fn(&str) -> Option<String>) -> BaseDirs {
-    let non_empty = |key: &str| -> Option<PathBuf> {
-        env(key).map(|value| value.trim().to_string()).filter(|value| !value.is_empty()).map(PathBuf::from)
-    };
+    let non_empty =
+        |key: &str| -> Option<PathBuf> { env(key).map(|value| value.trim().to_string()).filter(|value| !value.is_empty()).map(PathBuf::from) };
 
     let home = match platform {
         Platform::Windows => non_empty("USERPROFILE").or_else(|| {

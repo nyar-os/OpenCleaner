@@ -131,21 +131,8 @@ pub const PROJECT_RULES: &[ProjectRule] = &[
 
 /// Directory names the project walk never descends into. They are either
 /// artifacts themselves or repositories of unrelated projects.
-const SKIP_DESCEND: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-    ".next",
-    ".turbo",
-    ".venv",
-    "venv",
-    "vendor",
-    ".gradle",
-    "obj",
-    "bin",
-];
+const SKIP_DESCEND: &[&str] =
+    &[".git", "node_modules", "target", "dist", "build", ".next", ".turbo", ".venv", "venv", "vendor", ".gradle", "obj", "bin"];
 
 /// Names that can never become a candidate even if a rule is added later.
 const PROTECTED_NAMES: &[&str] = &[
@@ -265,12 +252,7 @@ pub fn match_rule_suffix(candidate: &Path) -> Option<(&'static ProjectRule, Path
 pub fn resolve_project_artifact(candidate: &Path) -> Option<(&'static ProjectRule, PathBuf)> {
     let (rule, root) = match_rule_suffix(candidate)?;
     let manifests = detect_manifests(&root);
-    if manifests.contains(&rule.anchor) {
-        Some((rule, root))
-    }
-    else {
-        None
-    }
+    if manifests.contains(&rule.anchor) { Some((rule, root)) } else { None }
 }
 
 #[cfg(test)]

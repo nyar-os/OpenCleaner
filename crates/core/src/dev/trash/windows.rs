@@ -1,11 +1,7 @@
 //! Windows recycle-bin deletion via `SHFileOperationW` (raw FFI, matching the
 //! existing registry module style — no extra crates).
 
-use std::{
-    ffi::c_void,
-    io,
-    path::Path,
-};
+use std::{ffi::c_void, io, path::Path};
 
 use crate::Result;
 
@@ -61,10 +57,7 @@ pub(super) fn trash_path(path: &Path) -> Result<()> {
         return Err(crate::Error::Message(format!("recycle bin refused {}", absolute.display())));
     }
     if code != 0 {
-        return Err(crate::Error::Io {
-            path: absolute.display().to_string(),
-            source: io::Error::from_raw_os_error(code as i32),
-        });
+        return Err(crate::Error::Io { path: absolute.display().to_string(), source: io::Error::from_raw_os_error(code as i32) });
     }
     Ok(())
 }
@@ -77,7 +70,11 @@ mod tests {
 
     #[test]
     fn moves_a_probe_directory_into_the_recycle_bin() {
-        let dir = std::env::temp_dir().join(format!("open-cleaner-trash-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "open-cleaner-trash-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("payload.txt"), b"fixture").unwrap();
 

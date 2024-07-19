@@ -19,10 +19,10 @@ pub struct GlobalCacheSpec {
     pub rule: &'static str,
 }
 
-#[cfg(windows)]
-mod windows;
 #[cfg(not(windows))]
 mod unix;
+#[cfg(windows)]
+mod windows;
 
 /// Resolve every known global cache path. Missing base directories simply drop
 /// the related specs; existence is checked by the caller.

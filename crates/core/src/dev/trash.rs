@@ -8,10 +8,10 @@ use std::path::Path;
 
 use crate::{Error, Result};
 
-#[cfg(windows)]
-mod windows;
 #[cfg(not(windows))]
 mod unix;
+#[cfg(windows)]
+mod windows;
 
 pub fn supported() -> bool {
     crate::platform::trash_available()

@@ -55,28 +55,16 @@ impl Error {
     #[allow(dead_code)]
     pub(crate) fn unsupported_platform(capability: &'static str) -> Self {
         let platform = crate::platform::name();
-        Self::Capability {
-            capability,
-            state: CapabilityState::UnsupportedPlatform,
-            detail: format!("not available on {platform}"),
-        }
+        Self::Capability { capability, state: CapabilityState::UnsupportedPlatform, detail: format!("not available on {platform}") }
     }
 
     pub(crate) fn not_implemented(capability: &'static str) -> Self {
-        Self::Capability {
-            capability,
-            state: CapabilityState::NotImplemented,
-            detail: "not implemented in this build".to_string(),
-        }
+        Self::Capability { capability, state: CapabilityState::NotImplemented, detail: "not implemented in this build".to_string() }
     }
 
     #[allow(dead_code)]
     pub(crate) fn dependency_blocked(capability: &'static str, detail: impl Into<String>) -> Self {
-        Self::Capability {
-            capability,
-            state: CapabilityState::DependencyBlocked,
-            detail: detail.into(),
-        }
+        Self::Capability { capability, state: CapabilityState::DependencyBlocked, detail: detail.into() }
     }
 }
 

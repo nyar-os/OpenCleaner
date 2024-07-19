@@ -53,8 +53,5 @@ pub(super) fn specs(dirs: &BaseDirs, env: impl Fn(&str) -> Option<String>) -> Ve
 
 fn dedupe(specs: Vec<GlobalCacheSpec>) -> Vec<GlobalCacheSpec> {
     let mut seen = std::collections::BTreeSet::new();
-    specs
-        .into_iter()
-        .filter(|spec| seen.insert(spec.path.clone()))
-        .collect()
+    specs.into_iter().filter(|spec| seen.insert(spec.path.clone())).collect()
 }

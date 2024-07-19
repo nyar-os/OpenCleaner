@@ -17,8 +17,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Error, Result,
     locations::{BaseDirs, base_dirs},
-    platform, Error, Result,
+    platform,
 };
 
 use self::rules::{Ecosystem, ManifestKind, ProjectRule};
@@ -184,10 +185,7 @@ pub fn dev_plan(options: DevScanOptions, mode: DeleteMode) -> Result<DevPlan> {
         DeleteMode::Trash => trash::supported(),
     };
     if !mode_supported {
-        warnings.push(format!(
-            "recycle bin is unavailable on {}; this plan can only be executed with permanent deletion",
-            platform::name()
-        ));
+        warnings.push(format!("recycle bin is unavailable on {}; this plan can only be executed with permanent deletion", platform::name()));
     }
 
     let mut items = Vec::with_capacity(report.artifacts.len());
@@ -242,7 +240,12 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
             continue;
         };
         if let Some(reason) = evaluate(&artifact, &dirs) {
-            items.push(DevCleanItem { path: raw, bytes: artifact.bytes, status: CleanStatus::Skipped, reason: Some(reason.as_str().to_string()) });
+            items.push(DevCleanItem {
+                path: raw,
+                bytes: artifact.bytes,
+                status: CleanStatus::Skipped,
+                reason: Some(reason.as_str().to_string()),
+            });
             continue;
         }
 
@@ -822,12 +825,8 @@ mod tests {
 
         let outside = root.join("outside");
         fs::create_dir_all(&outside).unwrap();
-        let report = dev_clean(DevCleanOptions {
-            paths: vec![outside.display().to_string()],
-            mode: DeleteMode::Permanent,
-            confirm: true,
-        })
-        .unwrap();
+        let report =
+            dev_clean(DevCleanOptions { paths: vec![outside.display().to_string()], mode: DeleteMode::Permanent, confirm: true }).unwrap();
         assert_eq!(report.items[0].status, CleanStatus::Skipped);
         assert!(outside.exists(), "unverified path must survive");
 
@@ -843,7 +842,8 @@ mod tests {
         touch(&root.join("app").join("src").join("main.rs"), 32);
 
         let target = root.join("app").join("target");
-        let report = dev_clean(DevCleanOptions { paths: vec![target.display().to_string()], mode: DeleteMode::Permanent, confirm: true }).unwrap();
+        let report =
+            dev_clean(DevCleanOptions { paths: vec![target.display().to_string()], mode: DeleteMode::Permanent, confirm: true }).unwrap();
 
         assert_eq!(report.items.len(), 1);
         assert_eq!(report.items[0].status, CleanStatus::Deleted);
@@ -858,12 +858,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn trash_mode_fails_explicitly_outside_windows() {
-        let err = dev_clean(DevCleanOptions {
-            paths: vec![std::env::temp_dir().display().to_string()],
-            mode: DeleteMode::Trash,
-            confirm: true,
-        })
-        .unwrap_err();
+        let err =
+            dev_clean(DevCleanOptions { paths: vec![std::env::temp_dir().display().to_string()], mode: DeleteMode::Trash, confirm: true })
+                .unwrap_err();
         assert_eq!(crate::capability_code(&err), Some("not_implemented"), "{err}");
     }
 
