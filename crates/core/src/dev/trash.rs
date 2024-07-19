@@ -24,8 +24,7 @@ pub fn trash_path(path: &Path) -> Result<()> {
     }
     #[cfg(not(windows))]
     {
-        let _ = path;
-        Err(Error::not_implemented("dev-trash"))
+        unix::trash_path(path)
     }
 }
 

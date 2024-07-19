@@ -29,6 +29,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
+          # This job only needs Node for stage/smoke scripts. Do not enable the
+          # package-manager cache: package.json declares pnpm, but this workflow
+          # never installs it (same trap as OpenDebugger check-rust).
+          package-manager-cache: false
       - name: stage platform package
         run: node --experimental-strip-types scripts/stage-native.ts
       - name: native smoke
