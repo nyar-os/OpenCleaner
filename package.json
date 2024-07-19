@@ -17,6 +17,7 @@
         "gui": "pnpm run build && pnpm --filter @wae/open-cleaner exec node ./dist/cli.js gui"
     },
     "devDependencies": {
+        "@doki-land/nifty": "^0.1.10",
         "@types/node": "^22.20.4",
         "typescript": "^5.9.2"
     }

@@ -1,0 +1,135 @@
+name: publish-npm
+
+# Trusted Publisher contract (sole npm trusted workflow — keep this filename):
+#   file = publish-npm.yml
+#   repo = nyar-os/OpenCleaner
+#   env  = NPM_PUBLISH
+#
+# Real `@wae/open-cleaner*` versions publish only through npm Trusted Publisher
+# (OIDC) on tag push. Local `nifty publish --placeholder` is only for 0.0.0 stubs.
+#
+# Native platform packages are built on matching runners, then published together.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag (for example v0.0.1). Its version is published."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-native:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: windows-latest
+            target: win32-x64
+          - runner: macos-14
+            target: darwin-arm64
+          - runner: macos-13
+            target: darwin-x64
+          - runner: ubuntu-latest
+            target: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24.12.0"
+          package-manager-cache: false
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build native addon
+        run: pnpm run build:napi
+      - name: Smoke load the native addon
+        run: pnpm run smoke:native
+      - uses: actions/upload-artifact@v5
+        with:
+          name: open-cleaner-${{ matrix.target }}
+          path: packages/open-cleaner-${{ matrix.target }}/open-cleaner.${{ matrix.target }}.node
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build-native
+    runs-on: ubuntu-latest
+    environment: NPM_PUBLISH
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24.12.0"
+          package-manager-cache: false
+      - name: Upgrade npm for Trusted Publisher support
+        run: npm install --global npm@11
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v5
+        with:
+          path: /tmp/open-cleaner-native
+          pattern: open-cleaner-*
+      - name: Stage platform artifacts
+        run: |
+          set -euo pipefail
+          for target in win32-x64 darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            src="/tmp/open-cleaner-native/open-cleaner-${target}/open-cleaner.${target}.node"
+            dest="packages/open-cleaner-${target}/open-cleaner.${target}.node"
+            test -f "$src"
+            cp "$src" "$dest"
+          done
+      - name: Build TypeScript
+        run: pnpm run build:ts
+      - name: Publish packages to npm
+        run: pnpm exec nifty publish --access public --version="${RELEASE_TAG#v}"
+      - name: Verify every package landed on the registry
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          for name in \
+            @wae/open-cleaner-win32-x64 \
+            @wae/open-cleaner-darwin-arm64 \
+            @wae/open-cleaner-darwin-x64 \
+            @wae/open-cleaner-linux-x64 \
+            @wae/open-cleaner-linux-arm64 \
+            @wae/open-cleaner-skills \
+            @wae/open-cleaner
+          do
+            for attempt in 1 2 3 4 5; do
+              if npm view "${name}@${version}" version > /dev/null 2>&1; then
+                echo "ok ${name}@${version}"
+                break
+              fi
+              if [ "${attempt}" = 5 ]; then
+                echo "missing ${name}@${version} after 5 attempts"
+                exit 1
+              fi
+              sleep 3
+            done
+          done
