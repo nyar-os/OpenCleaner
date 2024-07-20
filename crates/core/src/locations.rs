@@ -88,6 +88,9 @@ mod tests {
 
     #[test]
     fn windows_layout_uses_userprofile_and_localappdata() {
+        let home = PathBuf::from(r"C:\Users\dev");
+        let local = PathBuf::from(r"C:\Users\dev\AppData\Local");
+        let roaming = PathBuf::from(r"C:\Users\dev\AppData\Roaming");
         let dirs = resolve_dirs(
             Platform::Windows,
             env_from(&[
@@ -99,22 +102,25 @@ mod tests {
             ]),
         );
 
-        assert_eq!(dirs.home.as_deref(), Some(std::path::Path::new(r"C:\Users\dev")));
-        assert_eq!(dirs.local_app_data.as_deref(), Some(std::path::Path::new(r"C:\Users\dev\AppData\Local")));
-        assert_eq!(dirs.app_data.as_deref(), Some(std::path::Path::new(r"C:\Users\dev\AppData\Roaming")));
-        assert_eq!(dirs.program_data.as_deref(), Some(std::path::Path::new(r"D:\Data")));
-        assert_eq!(dirs.program_files.as_deref(), Some(std::path::Path::new(r"D:\Programs")));
-        assert_eq!(dirs.cache_dir, dirs.local_app_data);
-        assert_eq!(dirs.cargo_home.as_deref(), Some(std::path::Path::new(r"C:\Users\dev\.cargo")));
+        // Build expected paths with `PathBuf`/`join` so host separator rules match
+        // `resolve_dirs` on Unix CI runners as well as Windows.
+        assert_eq!(dirs.home, Some(home.clone()));
+        assert_eq!(dirs.local_app_data, Some(local.clone()));
+        assert_eq!(dirs.app_data, Some(roaming));
+        assert_eq!(dirs.program_data, Some(PathBuf::from(r"D:\Data")));
+        assert_eq!(dirs.program_files, Some(PathBuf::from(r"D:\Programs")));
+        assert_eq!(dirs.cache_dir, Some(local));
+        assert_eq!(dirs.cargo_home, Some(home.join(".cargo")));
     }
 
     #[test]
     fn windows_layout_falls_back_to_drive_and_windows_defaults() {
+        let home = PathBuf::from(r"C:\Users\dev");
         let dirs = resolve_dirs(Platform::Windows, env_from(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\dev")]));
 
-        assert_eq!(dirs.home.as_deref(), Some(std::path::Path::new(r"C:\Users\dev")));
-        assert_eq!(dirs.local_app_data.as_deref(), Some(std::path::Path::new(r"C:\Users\dev\AppData\Local")));
-        assert_eq!(dirs.program_data.as_deref(), Some(std::path::Path::new(r"C:\ProgramData")));
+        assert_eq!(dirs.home, Some(home.clone()));
+        assert_eq!(dirs.local_app_data, Some(home.join("AppData").join("Local")));
+        assert_eq!(dirs.program_data, Some(PathBuf::from(r"C:\ProgramData")));
     }
 
     #[test]
