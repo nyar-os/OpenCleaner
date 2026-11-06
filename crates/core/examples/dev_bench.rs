@@ -115,17 +115,17 @@ fn report_scan(report: &open_cleaner_core::DevScanReport, root: &Path) {
     println!("artifact bytes: {bytes}");
     if let Some(profile) = &report.profile {
         stages(profile);
-        let scan_ms = {
-            let total = stage_ms(profile, "scan");
-            if total > 0.0 { total } else { stage_ms(profile, "discovery") + stage_ms(profile, "measurement") }
-        };
-        let seconds = (scan_ms / 1000.0).max(f64::EPSILON);
-        println!("dirs: {}  files: {}  bytes: {}", profile.dirs_visited, profile.files_visited, profile.bytes_measured);
+        let scan_ms = stage_ms(profile, "scan");
+        let measure_ms = stage_ms(profile, "measurement");
         println!(
-            "rates: {:.1} dirs/s  {:.1} files/s  {}/s",
+            "dirs: {} listed  {} measured  files: {}  bytes: {}",
+            profile.dirs_visited, profile.measured_dirs, profile.files_visited, profile.bytes_measured
+        );
+        println!(
+            "rates: {:.1} dirs/s (walk)  {:.1} files/s  {}/s (measure)",
             per_second(profile.dirs_visited, scan_ms),
-            per_second(profile.files_visited, scan_ms),
-            human(profile.bytes_measured as f64 / seconds)
+            per_second(profile.files_visited, measure_ms),
+            human(per_second(profile.bytes_measured, measure_ms))
         );
         println!("peak working set: {}  peak handles: {}", opt_bytes(profile.peak_working_set_bytes), opt_num(profile.peak_handle_count));
     }

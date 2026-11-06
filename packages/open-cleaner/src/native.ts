@@ -117,7 +117,11 @@ export type DevStageTiming = {
 /** Opt-in measurements, present only when `OPEN_CLEANER_PROFILE` is set. */
 export type DevProfile = {
     stages: DevStageTiming[];
+    /** Directories listed by the project walk. */
     dirsVisited: number;
+    /** Directories listed again while sizing artifact subtrees. */
+    measuredDirs: number;
+    /** Files sized inside artifact subtrees. */
     filesVisited: number;
     bytesMeasured: number;
     peakWorkingSetBytes?: number | null;

@@ -67,7 +67,11 @@ pub struct DevStageTiming {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DevProfile {
     pub stages: Vec<DevStageTiming>,
+    /// Directories listed by the project walk.
     pub dirs_visited: u64,
+    /// Directories listed again while sizing an artifact subtree.
+    pub measured_dirs: u64,
+    /// Files sized inside artifact subtrees.
     pub files_visited: u64,
     pub bytes_measured: u64,
     pub peak_working_set_bytes: Option<u64>,
@@ -99,7 +103,10 @@ fn profiling_enabled() -> bool {
 struct ScanProfile {
     walk: Duration,
     measure: Duration,
+    /// Directories listed by the walk itself.
     dirs: u64,
+    /// Directories listed again while sizing artifact subtrees.
+    measured_dirs: u64,
     files: u64,
     bytes: u64,
 }
@@ -637,8 +644,15 @@ fn dev_scan_with(options: DevScanOptions, dirs: &BaseDirs) -> Result<DevScanRepo
     }
 
     let profile = collector.profile.map(|profile| {
-        let mut report =
-            DevProfile { dirs_visited: profile.dirs, files_visited: profile.files, bytes_measured: profile.bytes, ..DevProfile::default() };
+        let mut report = DevProfile {
+            stages: Vec::new(),
+            dirs_visited: profile.dirs,
+            measured_dirs: profile.measured_dirs,
+            files_visited: profile.files,
+            bytes_measured: profile.bytes,
+            peak_working_set_bytes: None,
+            peak_handle_count: None,
+        };
         report.add("scan", profile.walk);
         report.add("measurement", profile.measure);
         report.sample_peak();
@@ -717,6 +731,14 @@ impl Collector<'_> {
             Err(_) => unreadable = true,
         }
 
+        // Only the listing of this directory is charged to `scan`: artifact
+        // sizing and recursion into children have their own stage, so an outer
+        // directory must not absorb the time of its whole subtree.
+        if let (Some(profile), Some(start)) = (self.profile.as_mut(), started) {
+            profile.walk += start.elapsed();
+            profile.dirs += 1;
+        }
+
         if !manifests.is_empty() {
             self.scanned_projects += 1;
             for manifest in &manifests {
@@ -730,6 +752,7 @@ impl Collector<'_> {
         if unreadable {
             self.warnings.push(format!("cannot read {}; subtree skipped", dir.display()));
         }
+
         if depth < max_depth {
             for child in &children {
                 let Some(name) = child.file_name()
@@ -741,11 +764,6 @@ impl Collector<'_> {
                 }
                 self.walk(child, depth + 1, max_depth);
             }
-        }
-
-        if let (Some(profile), Some(start)) = (self.profile.as_mut(), started) {
-            profile.walk += start.elapsed();
-            profile.dirs += 1;
         }
     }
 
@@ -812,7 +830,7 @@ impl Collector<'_> {
         let stats = dir_size(path, warnings);
         if let (Some(profile), Some(start)) = (self.profile.as_mut(), started) {
             profile.measure += start.elapsed();
-            profile.dirs += stats.dirs;
+            profile.measured_dirs += stats.dirs;
             profile.files += stats.files;
             profile.bytes += stats.bytes;
         }

@@ -118,10 +118,16 @@ function printProfile(label: string, profile: DevProfile | null | undefined, tot
     if (!profile) return;
     const stages = profile.stages.map((stage) => `${stage.name}=${stage.elapsedMs.toFixed(0)}ms`).join('  ');
     const scanMs = profile.stages.find((stage) => stage.name === 'scan')?.elapsedMs ?? 0;
+    const measureMs = profile.stages.find((stage) => stage.name === 'measurement')?.elapsedMs ?? 0;
     const deleteMs = profile.stages.find((stage) => stage.name === 'delete')?.elapsedMs ?? 0;
     console.log(`profile[${label}]: ${stages}`);
     if (scanMs > 0) {
-        console.log(`  scan: ${rate(profile.dirsVisited, scanMs)} dirs/s  ${rate(profile.filesVisited, scanMs)} files/s  ${byteRate(profile.bytesMeasured, scanMs)}`);
+        console.log(`  scan: ${rate(profile.dirsVisited, scanMs)} dirs/s  (${profile.dirsVisited} listed dirs)`);
+    }
+    if (measureMs > 0) {
+        console.log(
+            `  measure: ${rate(profile.filesVisited, measureMs)} files/s  ${byteRate(profile.bytesMeasured, measureMs)}  (${profile.filesVisited} files, ${profile.measuredDirs} dirs)`,
+        );
     }
     if (deleteMs > 0 && totals?.bytes !== undefined) {
         console.log(`  delete: ${byteRate(totals.bytes, deleteMs)}  ${rate(totals.items ?? 0, deleteMs)} dirs/s`);
