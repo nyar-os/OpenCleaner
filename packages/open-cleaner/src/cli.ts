@@ -130,7 +130,7 @@ function printProfile(label: string, profile: DevProfile | null | undefined, tot
         );
     }
     if (deleteMs > 0 && totals?.bytes !== undefined) {
-        console.log(`  delete: ${byteRate(totals.bytes, deleteMs)}  ${rate(totals.items ?? 0, deleteMs)} dirs/s`);
+        console.log(`  delete: ${byteRate(totals.bytes, deleteMs)}  ${rate(totals.items ?? 0, deleteMs)} items/s`);
     }
     if (profile.peakWorkingSetBytes) console.log(`  peak working set: ${formatBytes(profile.peakWorkingSetBytes)}`);
     if (profile.peakHandleCount) console.log(`  peak handles: ${profile.peakHandleCount}`);
