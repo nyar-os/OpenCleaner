@@ -945,11 +945,16 @@ fn resolve_artifact(path: &Path, dirs: &BaseDirs) -> std::result::Result<(), Ski
     if !path.is_absolute() {
         return Err(SkipReason::RuleMismatch);
     }
-    if let Some((rule, root)) = rules::match_rule_suffix(path) {
-        if !rules::detect_manifests(&root).contains(&rule.anchor) {
-            return Err(SkipReason::ManifestMissing);
+    let matches = rules::match_rules_suffix(path);
+    if !matches.is_empty() {
+        // Several ecosystems can declare the same suffix; the path is accepted
+        // when any of their anchors exists in the owning project root.
+        return if matches.iter().any(|(rule, root)| rules::detect_manifests(root).contains(&rule.anchor)) {
+            Ok(())
         }
-        return Ok(());
+        else {
+            Err(SkipReason::ManifestMissing)
+        };
     }
     let specs = global::specs(dirs);
     if specs.iter().any(|spec| spec.path == path) { Ok(()) } else { Err(SkipReason::RuleMismatch) }
@@ -962,13 +967,13 @@ fn evaluate(artifact: &DevArtifact, dirs: &BaseDirs) -> Option<SkipReason> {
     }
 
     if artifact.level == 1 {
-        let matched = rules::match_rule_suffix(path);
-        let Some((rule, root)) = matched
-        else {
+        let matches = rules::match_rules_suffix(path);
+        if matches.is_empty() {
             return Some(SkipReason::RuleMismatch);
-        };
-        let manifests = rules::detect_manifests(&root);
-        if !manifests.contains(&rule.anchor) {
+        }
+        // `build/` and `target/` are declared by more than one ecosystem, so
+        // any of the matching anchors keeps the candidate legitimate.
+        if !matches.iter().any(|(rule, root)| rules::detect_manifests(root).contains(&rule.anchor)) {
             return Some(SkipReason::ManifestMissing);
         }
     }
@@ -1310,6 +1315,42 @@ mod tests {
             warnings: Vec::new(),
         };
         assert_eq!(evaluate(&lockfile, &base(&root)), Some(SkipReason::ProtectedPath));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shared_suffix_resolves_against_whichever_anchor_exists() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("shared-suffix");
+        let gradle = root.join("gradle-app");
+        touch(&gradle.join("build.gradle"), 8);
+        touch(&gradle.join("build").join("classes").join("a.class"), 400);
+        let node = root.join("node-app");
+        touch(&node.join("package.json"), 8);
+        touch(&node.join("build").join("bundle.js"), 200);
+        touch(&root.join("bare").join("build").join("out.bin"), 100);
+
+        let report = dev_scan_with(
+            DevScanOptions { roots: vec![root.display().to_string()], include_global: false, max_depth: None, limit: None },
+            &base(&root),
+        )
+        .unwrap();
+        assert_eq!(report.artifacts.len(), 2, "a `build` without any anchor is never a candidate: {:?}", report.artifacts);
+
+        let plan = dev_plan_with(report, DeleteMode::Permanent, &base(&root));
+        assert!(plan.items.iter().all(|item| item.removable), "each anchor keeps its own `build` removable: {:?}", plan.items);
+        assert_eq!(plan.removable_bytes, 600);
+
+        // Execution re-derives the rule from the path, and `build/` matches the
+        // Node rule first. The Gradle anchor must still legitimize the path.
+        let gradle_build = gradle.join("build");
+        let report =
+            dev_clean(DevCleanOptions { targets: vec![target(&gradle_build)], mode: DeleteMode::Permanent, confirm: true, concurrency: None })
+                .unwrap();
+        assert_eq!(report.items[0].status, CleanStatus::Deleted, "{:?}", report.items[0]);
+        assert!(!gradle_build.exists());
+        assert!(node.join("build").join("bundle.js").exists(), "the other project's `build` must survive");
 
         let _ = fs::remove_dir_all(&root);
     }

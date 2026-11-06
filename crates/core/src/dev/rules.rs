@@ -245,22 +245,26 @@ pub fn artifact_path(root: &Path, artifact: &str) -> PathBuf {
 /// Match only the trailing artifact name(s), ignoring the anchor manifest.
 ///
 /// Execution-time verification uses this to distinguish "the path no longer
-/// looks like an artifact" from "the manifest disappeared".
-pub fn match_rule_suffix(candidate: &Path) -> Option<(&'static ProjectRule, PathBuf)> {
+/// looks like an artifact" from "the manifest disappeared". One suffix can be
+/// declared by several ecosystems — `build/` belongs to Gradle and Node alike,
+/// `target/` to Cargo and Maven — so every candidate rule is returned and the
+/// caller accepts the path when any of their anchors exists.
+pub fn match_rules_suffix(candidate: &Path) -> Vec<(&'static ProjectRule, PathBuf)> {
     if !candidate.is_absolute() {
-        return None;
+        return Vec::new();
     }
+    let mut matches = Vec::new();
     for rule in PROJECT_RULES {
         let parts: Vec<&str> = rule.artifact.split('/').collect();
         let tail = candidate.components().rev().take(parts.len()).collect::<Vec<_>>();
         if tail.len() != parts.len() {
             continue;
         }
-        let matches = tail.iter().rev().zip(parts.iter()).all(|(component, expected)| match component {
+        let suffix_matches = tail.iter().rev().zip(parts.iter()).all(|(component, expected)| match component {
             Component::Normal(name) => name.to_string_lossy().eq_ignore_ascii_case(expected),
             _ => false,
         });
-        if !matches {
+        if !suffix_matches {
             continue;
         }
 
@@ -268,18 +272,21 @@ pub fn match_rule_suffix(candidate: &Path) -> Option<(&'static ProjectRule, Path
         for _ in parts {
             root.pop();
         }
-        return Some((rule, root));
+        matches.push((rule, root));
     }
-    None
+    matches
+}
+
+/// First rule whose suffix matches, without checking its anchor.
+pub fn match_rule_suffix(candidate: &Path) -> Option<(&'static ProjectRule, PathBuf)> {
+    match_rules_suffix(candidate).into_iter().next()
 }
 
 /// Re-derive the owning project root and rule for an existing candidate.
 ///
 /// Used at execution time so a caller cannot hand in an arbitrary path.
 pub fn resolve_project_artifact(candidate: &Path) -> Option<(&'static ProjectRule, PathBuf)> {
-    let (rule, root) = match_rule_suffix(candidate)?;
-    let manifests = detect_manifests(&root);
-    if manifests.contains(&rule.anchor) { Some((rule, root)) } else { None }
+    match_rules_suffix(candidate).into_iter().find(|(rule, root)| detect_manifests(root).contains(&rule.anchor))
 }
 
 #[cfg(test)]
