@@ -599,7 +599,12 @@ function platformPackageName(pa: PlatformArch): string {
     return PLATFORM_PACKAGES[pa];
 }
 
-function candidateNodePaths(): string[] {
+/**
+ * Specifiers to try: the optional platform package (via `package.json#main`),
+ * then the sibling checkout package directory. Never concatenate the `.node`
+ * filename — that lives only in the platform package's `main`.
+ */
+function candidateSpecifiers(): string[] {
     const pa = currentPlatformArch();
     if (!pa) {
         throw new Error(
@@ -609,23 +614,8 @@ function candidateNodePaths(): string[] {
     }
 
     const pkg = platformPackageName(pa);
-    const fileName = `open-cleaner.${pa}.node`;
-    const paths: string[] = [];
-
-    try {
-        const pkgJson = require.resolve(`${pkg}/package.json`);
-        const root = path.dirname(pkgJson);
-        paths.push(path.join(root, fileName));
-    } catch {
-        // optional dependency may be missing during monorepo dev
-    }
-
     // packages/open-cleaner/dist → ../../open-cleaner-<platform>-<arch>
-    paths.push(
-        path.resolve(here, `../../open-cleaner-${pa}/${fileName}`),
-        path.resolve(here, '../../../target/release/open_cleaner_napi.node'),
-    );
-    return paths;
+    return [pkg, path.resolve(here, `../../open-cleaner-${pa}`)];
 }
 
 let cached: NativeBinding | null = null;
@@ -633,11 +623,14 @@ let cached: NativeBinding | null = null;
 export function loadNative(): NativeBinding {
     if (cached) return cached;
     const tried: string[] = [];
-    for (const candidate of candidateNodePaths()) {
+    for (const candidate of candidateSpecifiers()) {
         tried.push(candidate);
-        if (!fs.existsSync(candidate)) continue;
-        cached = require(candidate) as NativeBinding;
-        return cached;
+        try {
+            cached = require(candidate) as NativeBinding;
+            return cached;
+        } catch {
+            // try the next specifier
+        }
     }
     throw new Error(
         `Failed to load open-cleaner native addon. Tried:\n${tried.map((p) => `  - ${p}`).join('\n')}`,
