@@ -9,7 +9,7 @@
         "open-cleaner.win32-x64.node",
         "README.md"
     ],
-    "license": "MPL-2.0",
+    "license": "Apache-2.0",
     "engines": {
         "node": ">=18"
     },

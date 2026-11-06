@@ -10,7 +10,7 @@
  * - every referenced command exists in `open-cleaner --help`
  * - every referenced flag exists in `<command> --help`
  * - no link or path in a skill leaves the published skills tree
- * - the skills package version matches the owning app package and uses `MPL-2.0`
+ * - the skills package version matches the owning app package and uses `Apache-2.0`
  */
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -120,7 +120,7 @@ if (!fs.existsSync(skillsRoot)) {
 const commands = commandTree();
 const app = readJson(appPackage);
 const skillsPackageJson = readJson(skillsPackage);
-if (skillsPackageJson.license !== 'MPL-2.0') fail('skills package `license` must be `MPL-2.0`');
+if (skillsPackageJson.license !== 'Apache-2.0') fail('skills package `license` must be `Apache-2.0`');
 if (skillsPackageJson.version !== app.version) {
     fail(`skills package version \`${skillsPackageJson.version}\` must match the app version \`${app.version}\``);
 }

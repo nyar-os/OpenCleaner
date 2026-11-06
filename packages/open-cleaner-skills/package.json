@@ -2,7 +2,7 @@
     "name": "@wae/open-cleaner-skills",
     "version": "0.0.0",
     "description": "Agent skills for the OpenCleaner CLI",
-    "license": "MPL-2.0",
+    "license": "Apache-2.0",
     "files": [
         "skills",
         "README.md"

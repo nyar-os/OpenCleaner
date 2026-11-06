@@ -5,7 +5,7 @@ copy the directory layout, replace `skills/*`, and keep the same metadata rules.
 
 ```text
 packages/open-cleaner-skills/
-  package.json          # files: only skills + README, license MPL-2.0
+  package.json          # files: only skills + README, license Apache-2.0
   README.md
   skills/
     <skill-name>/
