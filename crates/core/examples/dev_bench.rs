@@ -77,7 +77,7 @@ fn main() {
         .filter(|item| item.removable)
         .map(|item| open_cleaner_core::DevCleanTarget {
             path: item.artifact.path.clone(),
-            baseline: if baseline_mode == "none" { None } else { item.artifact.baseline },
+            baseline: if baseline_mode == "none" { None } else { item.artifact.baseline.clone() },
         })
         .collect();
     let planned_bytes: u64 = plan.items.iter().filter(|item| item.removable).map(|item| item.artifact.bytes).sum();
