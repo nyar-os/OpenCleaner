@@ -391,6 +391,15 @@ export type TempFailure = {
     reason: string;
 };
 
+/** One file that reached the removal pass. */
+export type TempCleanItem = {
+    path: string;
+    bytes: number;
+    status: "deleted" | "skipped" | "failed";
+    /** Empty for deleted files. */
+    reason: string;
+};
+
 export type TempCleanReport = {
     root: string;
     olderThanDays: number;
@@ -400,6 +409,8 @@ export type TempCleanReport = {
     deletedFiles: number;
     freedBytes: number;
     skipped: TempSkips;
+    /** Per-file outcomes for every file that reached the removal pass. */
+    items: TempCleanItem[];
     failures: TempFailure[];
     warnings: string[];
     finishedAtUnixMs: number;

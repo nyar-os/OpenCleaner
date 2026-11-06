@@ -103,6 +103,18 @@ pub struct TempFailure {
     pub reason: String,
 }
 
+/// One file that reached the removal pass, reported individually because a
+/// single counter cannot tell an operator which file stayed behind or why.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TempCleanItem {
+    pub path: String,
+    pub bytes: u64,
+    /// `deleted`, `skipped`, or `failed`.
+    pub status: String,
+    /// Empty for deleted files.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TempCleanReport {
     pub root: String,
@@ -113,6 +125,9 @@ pub struct TempCleanReport {
     pub deleted_files: u64,
     pub freed_bytes: u64,
     pub skipped: TempSkips,
+    /// Every file that reached the removal pass, including skipped and failed
+    /// ones. Filters applied before that pass stay in [`TempSkips`].
+    pub items: Vec<TempCleanItem>,
     pub failures: Vec<TempFailure>,
     pub warnings: Vec<String>,
     pub finished_at_unix_ms: u64,
@@ -368,8 +383,13 @@ pub fn temp_plan(options: TempOptions) -> Result<TempPlan> {
     })
 }
 
+fn clean_item(path: &Path, bytes: u64, status: &str, reason: &str) -> TempCleanItem {
+    TempCleanItem { path: path.display().to_string(), bytes, status: status.to_string(), reason: reason.to_string() }
+}
+
 /// Removes the candidate files derived from `cutoff_unix_ms`. Every file is
-/// re-validated, re-probed, and reported individually when it fails.
+/// re-validated, re-probed, and reported individually with its outcome so a
+/// caller can show which file was deleted, which was skipped and why.
 pub fn temp_clean(options: TempCleanOptions) -> Result<TempCleanReport> {
     if !options.confirm {
         return Err(Error::Message("temp-clean: refusing to delete without confirm".to_string()));
@@ -384,6 +404,7 @@ pub fn temp_clean(options: TempCleanOptions) -> Result<TempCleanReport> {
     let warnings = scanned.warnings;
 
     let mut skipped = scanned.skipped;
+    let mut items: Vec<TempCleanItem> = Vec::new();
     let mut deleted_files = 0u64;
     let mut freed_bytes = 0u64;
     let mut failures: Vec<TempFailure> = Vec::new();
@@ -393,38 +414,51 @@ pub fn temp_clean(options: TempCleanOptions) -> Result<TempCleanReport> {
         let meta = match std::fs::symlink_metadata(&candidate.path) {
             Ok(meta) => meta,
             Err(error) => {
-                failures.push(TempFailure { path: candidate.path.display().to_string(), reason: error.to_string() });
+                let reason = error.to_string();
+                items.push(clean_item(&candidate.path, candidate.bytes, "failed", &reason));
+                failures.push(TempFailure { path: candidate.path.display().to_string(), reason });
                 continue;
             }
         };
         if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
             skipped.symlink += 1;
+            items.push(clean_item(&candidate.path, meta.len(), "skipped", "symbolic link or junction"));
             continue;
         }
         if !meta.is_file() || !safety::is_within(&root, &candidate.path) || rules::is_protected(&candidate.path) {
             skipped.protected += 1;
+            items.push(clean_item(&candidate.path, meta.len(), "skipped", "protected path"));
             continue;
         }
         let Some(modified_ms) = modified_unix_ms(&meta)
         else {
             skipped.unreadable += 1;
+            items.push(clean_item(&candidate.path, meta.len(), "skipped", "modification time unavailable"));
             continue;
         };
         if modified_ms.saturating_add(threshold_ms) > cutoff_ms {
             skipped.recent += 1;
+            items.push(clean_item(&candidate.path, meta.len(), "skipped", "modified within the age threshold"));
             continue;
         }
         candidates += 1;
         if safety::probe_file_in_use(&candidate.path) {
             skipped.in_use += 1;
+            items.push(clean_item(&candidate.path, meta.len(), "skipped", "open by another process"));
             continue;
         }
         match std::fs::remove_file(&candidate.path) {
             Ok(()) => {
                 deleted_files += 1;
-                freed_bytes = freed_bytes.saturating_add(meta.len());
+                let bytes = meta.len();
+                freed_bytes = freed_bytes.saturating_add(bytes);
+                items.push(clean_item(&candidate.path, bytes, "deleted", ""));
             }
-            Err(error) => failures.push(TempFailure { path: candidate.path.display().to_string(), reason: error.to_string() }),
+            Err(error) => {
+                let reason = error.to_string();
+                items.push(clean_item(&candidate.path, meta.len(), "failed", &reason));
+                failures.push(TempFailure { path: candidate.path.display().to_string(), reason });
+            }
         }
     }
 
@@ -437,6 +471,7 @@ pub fn temp_clean(options: TempCleanOptions) -> Result<TempCleanReport> {
         deleted_files,
         freed_bytes,
         skipped,
+        items,
         failures,
         warnings,
         finished_at_unix_ms: safety::now_unix_ms(),
@@ -497,6 +532,10 @@ mod tests {
         })
         .expect("clean");
         assert_eq!(report.deleted_files, 1);
+        assert_eq!(report.items.len(), 1);
+        assert_eq!(report.items[0].status, "deleted");
+        assert_eq!(report.items[0].bytes, 1024);
+        assert!(report.items[0].reason.is_empty());
         assert!(!old.exists());
         assert!(fresh.exists());
         std::fs::remove_dir_all(&root).ok();

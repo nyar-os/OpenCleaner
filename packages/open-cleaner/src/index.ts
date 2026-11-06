@@ -185,6 +185,7 @@ export type {
     BuildRootOptions,
     BuildRootPlan,
     TempCleanOptions,
+    TempCleanItem,
     TempCleanReport,
     TempCwdProbe,
     TempFailure,
