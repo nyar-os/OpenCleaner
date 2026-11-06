@@ -39,10 +39,52 @@ Use when the user wants to reclaim space from build outputs without touching sou
   count looks wrong.
 - A scan row is a file. Empty directories and directory totals do not appear as rows.
 
+## Risk tiers
+
+Classify every candidate before proposing a deletion, and never move an item up a tier to
+reclaim more bytes. The test is operational, not nominal: a path is only S when the build can
+be reproduced from source that stays on disk, without downloading anything again.
+
+| Tier | Test | Examples |
+| --- | --- | --- |
+| S | Reproduced from on-disk sources with no network and no loss of user data | `target/`, `dist/`, `build/`, `.next/`, `.turbo/`, `obj/`, `bin/` in a user project |
+| A | Regenerated only after a network fetch, or the loss is a cache hit / diagnostic record | `node_modules/`, `.venv/`, `venv/`, `vendor/bundle/`, package manager stores, browser caches, prefetch, crash dumps, logs |
+| B | Needs a system service, elevation, or installer state to undo | system temp roots, update downloads, package caches used for repair and uninstall, portable databases, recovery images |
+| X | User data or system-owned state that this tool never removes | recycle bin contents, `WinSxS`, page and swap files, restore points and volume snapshots, MSI store, user documents and application data |
+
+### The S set
+
+`open-cleaner dev` selects S candidates. Run the dry-run plan first, then confirm:
+
+`open-cleaner dev --root <project-root> --only target,dist --mode permanent --yes --actor-id <id> --actor-kind agent`
+
+The gates below must all hold, and a skipped item is reported with its reason rather than retried:
+
+- a manifest anchor in the owning project root (`Cargo.toml`, `package.json`, `pyproject.toml`,
+  `build.gradle`, `pom.xml`, `Gemfile`, a `*.csproj` or `*.sln`) and the exact artifact suffix
+- not a protected path, symbolic link, junction, or reparse point
+- the rename probe succeeds, so the directory is not held open by another process
+
+Dependency trees (`node_modules/`, `.venv/`, `venv/`, `vendor/bundle/`) and every global cache
+are A, not S: reinstalling them needs the network again.
+
+### Installing software is never S
+
+The rule table matches a `package.json` next to a `node_modules/` or `dist/` directory wherever
+that directory happens to live, so installed programs and editor extensions match as well. A
+deletion there breaks a working program instead of a rebuildable build. Before adding a path
+to an S plan, reject any candidate below an installation or application root:
+
+- `Program Files`, `Program Files (x86)`, `ProgramData`, `Windows`
+- application data roots that hold packaged extensions, for example `AppData` extension folders
+- any path whose manifest belongs to a shipped product rather than the user's project
+
+Report those as B and leave them alone. A directory name alone is never evidence.
+
 ## Safety
 
-- Preview first with `scan`. There is no delete command and no `--dry-run` flag in this CLI
-  build, so deletion is always a separate confirmed action.
+- Preview first with `scan` or `dev` without `--yes`. Deletion is always a separate, confirmed
+  action and is permanent unless `--mode trash` is requested.
 - Never delete `node_modules` or `target` at a workspace root when the user only named one
   project.
 - Never run `cargo clean` from a directory the user did not name.
