@@ -105,6 +105,10 @@ function rate(value: number, ms: number): string {
     return ms <= 0 ? 'n/a' : (value / (ms / 1000)).toFixed(1);
 }
 
+function byteRate(bytes: number, ms: number): string {
+    return ms <= 0 ? 'n/a' : `${formatBytes(bytes / (ms / 1000))}/s`;
+}
+
 /** Print side-channel timings captured during the run. No-op when profiling is off. */
 function printProfile(label: string, profile: DevProfile | null | undefined, totals?: { bytes?: number; items?: number }): void {
     if (!profile) return;
@@ -113,10 +117,10 @@ function printProfile(label: string, profile: DevProfile | null | undefined, tot
     const deleteMs = profile.stages.find((stage) => stage.name === 'delete')?.elapsedMs ?? 0;
     console.log(`profile[${label}]: ${stages}`);
     if (scanMs > 0) {
-        console.log(`  scan: ${rate(profile.dirsVisited, scanMs)} dirs/s  ${rate(profile.filesVisited, scanMs)} files/s  ${formatBytes(profile.bytesMeasured)}/s`);
+        console.log(`  scan: ${rate(profile.dirsVisited, scanMs)} dirs/s  ${rate(profile.filesVisited, scanMs)} files/s  ${byteRate(profile.bytesMeasured, scanMs)}`);
     }
     if (deleteMs > 0 && totals?.bytes !== undefined) {
-        console.log(`  delete: ${formatBytes(totals.bytes)}/s  ${rate(totals.items ?? 0, deleteMs)} dirs/s`);
+        console.log(`  delete: ${byteRate(totals.bytes, deleteMs)}  ${rate(totals.items ?? 0, deleteMs)} dirs/s`);
     }
     if (profile.peakWorkingSetBytes) console.log(`  peak working set: ${formatBytes(profile.peakWorkingSetBytes)}`);
     if (profile.peakHandleCount) console.log(`  peak handles: ${profile.peakHandleCount}`);
