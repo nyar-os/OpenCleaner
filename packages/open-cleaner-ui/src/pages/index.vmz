@@ -10,8 +10,34 @@
                         {{ lead }}
                     </p>
                 </header>
-                <Card :title="scanCardTitle" :description="scanCardDesc">
+                <Card :title="sessionCardTitle" :description="sessionCardDesc">
+                    <div class="oc-modes">
+                        <Button type="button" :variant="scanModeVariant" :disabled="busy" @click="setModeScan">
+                            Scan
+                        </Button>
+                        <Button type="button" :variant="tempModeVariant" :disabled="busy" @click="setModeTemp">
+                            Temp files
+                        </Button>
+                        <Button type="button" :variant="rootsModeVariant" :disabled="busy" @click="setModeRoots">
+                            Build roots
+                        </Button>
+                    </div>
+                    <div class="oc-bar">
+                        <div class="oc-bar__item">
+                            <span class="oc-bar__key">Root</span>
+                            <span class="oc-bar__value">{{ rootText }}</span>
+                        </div>
+                        <div class="oc-bar__item">
+                            <span class="oc-bar__key">Rule set</span>
+                            <span class="oc-bar__value">{{ ruleSetText }}</span>
+                        </div>
+                        <div class="oc-bar__item">
+                            <span class="oc-bar__key">Threshold</span>
+                            <span class="oc-bar__value">{{ thresholdText }}</span>
+                        </div>
+                    </div>
                     <Field
+                        v-if="showScan || showTemp"
                         :label="rootLabel"
                         :description="rootDesc"
                         controlId="oc-root"
@@ -22,9 +48,45 @@
                         :placeholder="rootPlaceholder"
                         @input="onRootInput"
                     />
+                    <Field
+                        v-if="showTemp"
+                        :label="thresholdLabel"
+                        :description="thresholdDesc"
+                        controlId="oc-threshold"
+                        descriptionId="oc-threshold-desc"
+                        errorId="oc-threshold-err"
+                        describedBy="oc-threshold-desc"
+                        :value="olderThanDaysText"
+                        :placeholder="thresholdPlaceholder"
+                        @input="onThresholdInput"
+                    />
                     <div class="oc-actions">
-                        <Button type="button" :loading="scanning" :disabled="scanning" @click="runScan">
+                        <Button v-if="showScan" type="button" :loading="busy" :disabled="busy" @click="runScan">
                             {{ scanLabel }}
+                        </Button>
+                        <Button v-if="showTemp" type="button" :loading="busy" :disabled="busy" @click="planTemp">
+                            {{ planTempLabel }}
+                        </Button>
+                        <Button
+                            v-if="showTemp"
+                            type="button"
+                            variant="danger"
+                            :disabled="tempExecuteDisabled"
+                            @click="cleanTemp"
+                        >
+                            {{ cleanTempLabel }}
+                        </Button>
+                        <Button v-if="showRoots" type="button" :loading="busy" :disabled="busy" @click="planBuildRoots">
+                            {{ planRootsLabel }}
+                        </Button>
+                        <Button
+                            v-if="showRoots"
+                            type="button"
+                            variant="danger"
+                            :disabled="rootsExecuteDisabled"
+                            @click="cleanBuildRoots"
+                        >
+                            {{ cleanRootsLabel }}
                         </Button>
                         <Button type="button" variant="secondary" @click="requestClose">
                             {{ closeLabel }}
@@ -33,7 +95,8 @@
                     <Alert v-if="error" tone="danger" roleName="alert" :title="errorTitle" :description="error" />
                     <Alert v-else-if="status" tone="info" roleName="status" :title="statusTitle" :description="status" />
                 </Card>
-                <Card :title="resultCardTitle" :description="resultCardDesc">
+
+                <Card v-if="showScan" :title="scanCardTitle" :description="scanCardDesc">
                     <div class="oc-stats">
                         <div class="oc-stat">
                             <div class="oc-stat__label">
@@ -60,12 +123,12 @@
                             </div>
                         </div>
                     </div>
-                    <Empty v-if="!rows.length && !scanning" :title="emptyTitle" :description="emptyDesc" />
+                    <Empty v-if="!rows.length && !busy" :title="emptyTitle" :description="emptyDesc" />
                     <Table
                         v-else
                         :columns="columns"
                         :rows="rows"
-                        :loading="scanning"
+                        :loading="busy"
                         :loadingLabel="loadingLabel"
                         :loadingText="loadingText"
                         :hasRowAction="false"
@@ -73,6 +136,154 @@
                         :sortDir="sortDir"
                         :onSort="sortBy"
                     />
+                </Card>
+
+                <Card v-if="showTemp && tempPlanExists" :title="tempPlanTitle" :description="tempPlanDesc">
+                    <div class="oc-stats">
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Candidates
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ tempCandidatesText }}
+                            </div>
+                        </div>
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Scanned
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ tempScannedText }}
+                            </div>
+                        </div>
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Root
+                            </div>
+                            <div class="oc-stat__value oc-stat__value--path">
+                                {{ tempRootText }}
+                            </div>
+                        </div>
+                    </div>
+                    <Alert v-if="tempWarnings" tone="warning" roleName="status" title="Plan warnings" :description="tempWarnings" />
+                    <h3 class="oc-subhead">
+                        Age distribution
+                    </h3>
+                    <Table :columns="countColumns" :rows="ageRows" :hasRowAction="false" />
+                    <h3 class="oc-subhead">
+                        Extension distribution
+                    </h3>
+                    <Table :columns="countColumns" :rows="extRows" :hasRowAction="false" />
+                    <h3 class="oc-subhead">
+                        Skipped
+                    </h3>
+                    <Table :columns="skipColumns" :rows="skipRows" :hasRowAction="false" />
+                    <p class="oc-note">
+                        {{ tempProbeText }}
+                    </p>
+                    <h3 class="oc-subhead">
+                        Largest candidates
+                    </h3>
+                    <Table :columns="sampleColumns" :rows="sampleRows" :hasRowAction="false" />
+                    <p class="oc-note">
+                        {{ tempSamplesNote }}
+                    </p>
+                </Card>
+
+                <Card v-if="showTemp && tempResultExists" :title="tempResultTitle" :description="tempResultDesc">
+                    <div class="oc-stats">
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Deleted
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ tempDeletedText }}
+                            </div>
+                        </div>
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Freed
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ tempFreedText }}
+                            </div>
+                        </div>
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Skipped
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ tempSkippedText }}
+                            </div>
+                        </div>
+                    </div>
+                    <Alert v-if="tempResultWarnings" tone="warning" roleName="status" title="Execution warnings" :description="tempResultWarnings" />
+                    <Table :columns="itemColumns" :rows="tempItemRows" :hasRowAction="false" />
+                    <p class="oc-note">
+                        {{ tempItemNote }}
+                    </p>
+                </Card>
+
+                <Card v-if="showRoots && rootsPlanExists" :title="rootsPlanTitle" :description="rootsPlanDesc">
+                    <div class="oc-stats">
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Config
+                            </div>
+                            <div class="oc-stat__value oc-stat__value--path">
+                                {{ rootsConfigText }}
+                            </div>
+                        </div>
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Declared
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ rootsDeclaredText }}
+                            </div>
+                        </div>
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Removable
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ rootsRemovableText }}
+                            </div>
+                        </div>
+                    </div>
+                    <Alert v-if="rootsWarnings" tone="warning" roleName="status" title="Plan warnings" :description="rootsWarnings" />
+                    <Table :columns="rootsColumns" :rows="rootsRows" :hasRowAction="false" />
+                </Card>
+
+                <Card v-if="showRoots && rootsResultExists" :title="rootsResultTitle" :description="rootsResultDesc">
+                    <div class="oc-stats">
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Deleted directories
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ rootsDeletedText }}
+                            </div>
+                        </div>
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Freed
+                            </div>
+                            <div class="oc-stat__value">
+                                {{ rootsFreedText }}
+                            </div>
+                        </div>
+                        <div class="oc-stat">
+                            <div class="oc-stat__label">
+                                Config
+                            </div>
+                            <div class="oc-stat__value oc-stat__value--path">
+                                {{ rootsResultConfigText }}
+                            </div>
+                        </div>
+                    </div>
+                    <Alert v-if="rootsResultWarnings" tone="warning" roleName="status" title="Execution warnings" :description="rootsResultWarnings" />
+                    <Table :columns="rootItemColumns" :rows="rootsItemRows" :hasRowAction="false" />
                 </Card>
             </div>
         </AppShell>
@@ -97,6 +308,36 @@
     margin: 0;
     color: var(--vmz-text-steel, var(--vmz-text-muted, #8b93a7));
 }
+.oc-modes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--vmz-space-2, 0.5rem);
+}
+.oc-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--vmz-space-3, 0.75rem);
+    margin-top: var(--vmz-space-3, 0.75rem);
+    padding: var(--vmz-space-3, 0.75rem);
+    border: 1px solid var(--vmz-line-default, #2a3140);
+    border-radius: var(--vmz-radius-md, 8px);
+}
+.oc-bar__item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 10rem;
+}
+.oc-bar__key {
+    color: var(--vmz-text-steel, #8b93a7);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.oc-bar__value {
+    font-size: 0.82rem;
+    word-break: break-all;
+}
 .oc-actions {
     display: flex;
     flex-wrap: wrap;
@@ -105,7 +346,7 @@
 }
 .oc-stats {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
     gap: var(--vmz-space-3, 0.75rem);
     margin-bottom: var(--vmz-space-4, 1rem);
 }
@@ -128,25 +369,49 @@
     font-size: 0.85rem;
     word-break: break-all;
 }
-@media (max-width: 720px) {
-    .oc-stats {
-        grid-template-columns: 1fr;
-    }
+.oc-subhead {
+    margin: var(--vmz-space-4, 1rem) 0 var(--vmz-space-2, 0.5rem);
+    font-size: 0.95rem;
+}
+.oc-note {
+    margin: var(--vmz-space-2, 0.5rem) 0 0;
+    color: var(--vmz-text-steel, #8b93a7);
+    font-size: 0.8rem;
 }
 </style>
 <script client>
+const SKIP_REASONS = [
+    ["recent", "modified within the age threshold"],
+    ["symlink", "symbolic link or junction"],
+    ["protected", "protected path"],
+    ["inUse", "open by another process"],
+    ["cwdShielded", "process working directory"],
+    ["processTemp", "process temp directory"],
+    ["programShielded", "running program image directory"],
+    ["unreadable", "unreadable entry"],
+];
+const ITEM_DISPLAY_LIMIT = 300;
+
 export default class IndexPage {
     title = "Open Cleaner";
-    lead = "Scan a directory and review the largest entries.";
-    navItems = [{ id: "scan", title: "Scan", href: "/" }];
-    scanCardTitle = "Scan";
-    scanCardDesc = "Choose a root directory, or leave empty for the system temp folder.";
+    lead = "Pick a rule set, inspect what it would touch, then execute it and read every outcome.";
+    navItems = [{ id: "scan", title: "Reclaim", href: "/" }];
+
+    sessionCardTitle = "Rule set";
+    sessionCardDesc = "The bar always shows the root, rule set and threshold used by the next action.";
+
     rootLabel = "Root directory";
-    rootDesc = "Absolute path to scan.";
-    rootPlaceholder = "Empty = system temp";
+    rootDesc = "Absolute path. Empty means the system temp folder for scan and temp, and the default config for build roots.";
+    rootPlaceholder = "Empty = default";
+    thresholdLabel = "Minimum age in days";
+    thresholdDesc = "A file is a candidate only when its modification time is at least this old. Day 0 files are never touched.";
+    thresholdPlaceholder = "7";
+
+    scanCardTitle = "Scan";
+    scanCardDesc = "Read-only listing of the largest entries under the root.";
     scanLabel = "Scan";
     closeLabel = "Close";
-    errorTitle = "Scan failed";
+    errorTitle = "Action failed";
     statusTitle = "Status";
     resultCardTitle = "Results";
     resultCardDesc = "Largest entries from the last scan.";
@@ -158,33 +423,202 @@ export default class IndexPage {
     loadingLabel = "Scanning";
     loadingText = "Working…";
 
+    planTempLabel = "Build plan";
+    cleanTempLabel = "Delete planned files";
+    tempPlanTitle = "Temp plan";
+    tempPlanDesc = "Read-only. Each candidate was checked for age, protection, links and occupancy before it was counted.";
+    tempResultTitle = "Temp execution";
+    tempResultDesc = "Every file that reached the deletion pass is listed with its outcome and reason.";
+    planRootsLabel = "Read config and build plan";
+    cleanRootsLabel = "Delete removable roots";
+    rootsPlanTitle = "Build-root plan";
+    rootsPlanDesc = "Only directories declared as absolute paths in the config file are evaluated, and each entry names its authorizing line.";
+    rootsResultTitle = "Build-root execution";
+    rootsResultDesc = "Directories are removed whole, so each entry reports one outcome for the whole subtree.";
+
+    mode = "scan";
+    showScan = true;
+    showTemp = false;
+    showRoots = false;
+    scanModeVariant = "default";
+    tempModeVariant = "secondary";
+    rootsModeVariant = "secondary";
+
     root = "";
-    scanning = false;
+    olderThanDaysText = "7";
+    rootText = "system temp folder (default)";
+    ruleSetText = "scan: directory entries, read only";
+    thresholdText = "not used";
+
+    busy = false;
     error = "";
     status = "Ready.";
-    totalText = "—";
-    countText = "—";
-    scannedRoot = "—";
-    sortKey = "bytes";
-    sortDir = "desc";
-    columns = [
+
+    scanColumns = [
         { id: "kind", title: "Kind" },
         { id: "bytes", title: "Size", align: "right" },
         { id: "path", title: "Path" },
     ];
+    countColumns = [
+        { id: "label", title: "Bucket" },
+        { id: "files", title: "Files", align: "right" },
+        { id: "bytes", title: "Size", align: "right" },
+        { id: "share", title: "Share", align: "right" },
+    ];
+    skipColumns = [
+        { id: "reason", title: "Skip reason" },
+        { id: "files", title: "Entries", align: "right" },
+    ];
+    sampleColumns = [
+        { id: "path", title: "Path" },
+        { id: "age", title: "Age", align: "right" },
+        { id: "bytes", title: "Size", align: "right" },
+    ];
+    itemColumns = [
+        { id: "status", title: "Status" },
+        { id: "bytes", title: "Size", align: "right" },
+        { id: "reason", title: "Reason" },
+        { id: "path", title: "Path" },
+    ];
+    rootsColumns = [
+        { id: "path", title: "Declared path" },
+        { id: "line", title: "Line", align: "right" },
+        { id: "files", title: "Files", align: "right" },
+        { id: "bytes", title: "Size", align: "right" },
+        { id: "status", title: "Status" },
+    ];
+    rootItemColumns = [
+        { id: "path", title: "Declared path" },
+        { id: "line", title: "Line", align: "right" },
+        { id: "files", title: "Files", align: "right" },
+        { id: "bytes", title: "Size", align: "right" },
+        { id: "status", title: "Status" },
+        { id: "reason", title: "Reason" },
+    ];
+
     rows = [];
+    sortKey = "bytes";
+    sortDir = "desc";
+    totalText = "—";
+    countText = "—";
+    scannedRoot = "—";
+
+    tempPlan = null;
+    tempPlanExists = false;
+    tempExecuteDisabled = true;
+    tempCandidatesText = "—";
+    tempScannedText = "—";
+    tempRootText = "—";
+    tempProbeText = "";
+    tempWarnings = "";
+    ageRows = [];
+    extRows = [];
+    skipRows = [];
+    sampleRows = [];
+    tempSamplesNote = "";
+
+    tempResultExists = false;
+    tempDeletedText = "—";
+    tempFreedText = "—";
+    tempSkippedText = "—";
+    tempItemRows = [];
+    tempItemNote = "";
+    tempResultWarnings = "";
+
+    rootsPlanExists = false;
+    rootsExecuteDisabled = true;
+    rootsConfigText = "—";
+    rootsDeclaredText = "—";
+    rootsRemovableText = "—";
+    rootsWarnings = "";
+    rootsRows = [];
+    rootsResultExists = false;
+    rootsDeletedText = "—";
+    rootsFreedText = "—";
+    rootsResultConfigText = "—";
+    rootsResultWarnings = "";
+    rootsItemRows = [];
+    _removableRoots = [];
     _seq = 0;
     _entries = [];
 
     onMount() {
         this.installHostBridge();
-        // Only auto-scan inside the native WebView2 host.
         const bridge = globalThis.chrome && globalThis.chrome.webview;
         if (bridge && bridge.postMessage) this.runScan();
     }
 
+    setModeScan() {
+        this.applyMode("scan", true, false, false);
+    }
+
+    setModeTemp() {
+        this.applyMode("temp", false, true, false);
+    }
+
+    setModeRoots() {
+        this.applyMode("roots", false, false, true);
+    }
+
+    applyMode(mode, scan, temp, roots) {
+        this.mode = mode;
+        this.showScan = scan;
+        this.showTemp = temp;
+        this.showRoots = roots;
+        this.scanModeVariant = scan ? "default" : "secondary";
+        this.tempModeVariant = temp ? "default" : "secondary";
+        this.rootsModeVariant = roots ? "default" : "secondary";
+        this.tempPlanExists = false;
+        this.tempResultExists = false;
+        this.rootsPlanExists = false;
+        this.rootsResultExists = false;
+        this.ageRows = [];
+        this.extRows = [];
+        this.skipRows = [];
+        this.sampleRows = [];
+        this.tempItemRows = [];
+        this.rootsRows = [];
+        this.rootsItemRows = [];
+        this.tempWarnings = "";
+        this.tempResultWarnings = "";
+        this.rootsWarnings = "";
+        this.rootsResultWarnings = "";
+        this.error = "";
+        this.status = "Ready.";
+        this.refreshBar();
+    }
+
     onRootInput(e) {
         this.root = e && e.target ? String(e.target.value || "") : "";
+        this.refreshBar();
+    }
+
+    onThresholdInput(e) {
+        this.olderThanDaysText = e && e.target ? String(e.target.value || "") : "";
+        this.refreshBar();
+    }
+
+    thresholdDays() {
+        const parsed = parseInt(this.olderThanDaysText, 10);
+        if (!Number.isFinite(parsed) || parsed < 1) return 7;
+        return Math.min(parsed, 365);
+    }
+
+    refreshBar() {
+        const root = (this.root || "").trim();
+        if (this.mode === "roots") {
+            this.rootText = root || "default build-root config";
+            this.ruleSetText = "build roots: config-declared absolute paths";
+            this.thresholdText = "10 minute write window";
+        } else if (this.mode === "temp") {
+            this.rootText = root || "system temp folder (default)";
+            this.ruleSetText = "temp files: per-file age, protection, link and occupancy checks";
+            this.thresholdText = `${this.thresholdDays()} days`;
+        } else {
+            this.rootText = root || "system temp folder (default)";
+            this.ruleSetText = "scan: directory entries, read only";
+            this.thresholdText = "not used";
+        }
     }
 
     installHostBridge() {
@@ -201,21 +635,52 @@ export default class IndexPage {
             }
             if (!data || typeof data !== "object") return;
             if (data.type === "scanResult") {
-                this.scanning = false;
+                this.busy = false;
                 this.error = "";
                 this.applyReport(data.report || {});
                 this.status = "Scan complete.";
             } else if (data.type === "scanError") {
-                this.scanning = false;
-                this.error = String(data.message || "unknown error");
-                this.status = "";
+                this.fail(data.message);
+            } else if (data.type === "tempPlanResult") {
+                this.busy = false;
+                this.error = "";
+                this.applyTempPlan(data.report || {});
+                this.status = "Temp plan ready. Review it before deleting anything.";
+            } else if (data.type === "tempPlanError") {
+                this.fail(data.message);
+            } else if (data.type === "tempCleanResult") {
+                this.busy = false;
+                this.error = "";
+                this.applyTempResult(data.report || {});
+            } else if (data.type === "tempCleanError") {
+                this.fail(data.message);
+            } else if (data.type === "buildRootPlanResult") {
+                this.busy = false;
+                this.error = "";
+                this.applyRootsPlan(data.report || {});
+                this.status = "Build-root plan ready.";
+            } else if (data.type === "buildRootPlanError") {
+                this.fail(data.message);
+            } else if (data.type === "buildRootCleanResult") {
+                this.busy = false;
+                this.error = "";
+                this.applyRootsResult(data.report || {});
+            } else if (data.type === "buildRootCleanError") {
+                this.fail(data.message);
             }
         });
+    }
+
+    fail(message) {
+        this.busy = false;
+        this.error = String(message || "unknown error");
+        this.status = "";
     }
 
     post(msg) {
         const bridge = globalThis.chrome && globalThis.chrome.webview;
         if (!bridge || !bridge.postMessage) {
+            this.busy = false;
             this.error = "Native bridge unavailable (not running inside WebView2).";
             this.status = "";
             return false;
@@ -224,14 +689,64 @@ export default class IndexPage {
         return true;
     }
 
-    runScan() {
+    nextId() {
         this._seq += 1;
-        this.scanning = true;
+        return this._seq;
+    }
+
+    runScan() {
+        this.busy = true;
         this.error = "";
         this.status = "Scanning…";
         const root = (this.root || "").trim();
-        if (!this.post({ type: "scan", id: this._seq, root: root || undefined })) {
-            this.scanning = false;
+        if (!this.post({ type: "scan", id: this.nextId(), root: root || undefined })) {
+            this.busy = false;
+        }
+    }
+
+    planTemp() {
+        this.busy = true;
+        this.error = "";
+        this.status = "Collecting temp candidates…";
+        this.tempResultExists = false;
+        const options = { olderThanDays: this.thresholdDays() };
+        const root = (this.root || "").trim();
+        if (root) options.root = root;
+        if (!this.post({ type: "tempPlan", id: this.nextId(), options })) {
+            this.busy = false;
+        }
+    }
+
+    cleanTemp() {
+        if (!this.tempPlan) return;
+        this.busy = true;
+        this.error = "";
+        this.status = "Deleting the planned files…";
+        const options = { olderThanDays: this.thresholdDays(), cutoffUnixMs: this.tempPlan.cutoffUnixMs, confirm: true };
+        const root = (this.root || "").trim();
+        if (root) options.root = root;
+        if (!this.post({ type: "tempClean", id: this.nextId(), options })) {
+            this.busy = false;
+        }
+    }
+
+    planBuildRoots() {
+        this.busy = true;
+        this.error = "";
+        this.status = "Reading the build-root config…";
+        this.rootsResultExists = false;
+        if (!this.post({ type: "buildRootPlan", id: this.nextId(), options: {} })) {
+            this.busy = false;
+        }
+    }
+
+    cleanBuildRoots() {
+        if (!this._removableRoots.length) return;
+        this.busy = true;
+        this.error = "";
+        this.status = "Deleting removable build roots…";
+        if (!this.post({ type: "buildRootClean", id: this.nextId(), options: { paths: this._removableRoots, confirm: true } })) {
+            this.busy = false;
         }
     }
 
@@ -275,6 +790,143 @@ export default class IndexPage {
             this.sortDir = key === "bytes" ? "desc" : "asc";
         }
         this.rebuildRows();
+    }
+
+    applyTempPlan(report) {
+        this.tempPlan = report;
+        this.tempPlanExists = true;
+        this.tempExecuteDisabled = false;
+        this.tempCandidatesText = `${Number(report.candidateFiles) || 0} files · ${this.formatBytes(Number(report.candidateBytes) || 0)}`;
+        this.tempScannedText = `${Number(report.scannedFiles) || 0} files · ${this.formatBytes(Number(report.scannedBytes) || 0)}`;
+        this.tempRootText = String(report.root || "—");
+        this.ageRows = this.groupRows(report.ageGroups, Number(report.candidateBytes) || 0);
+        this.extRows = this.groupRows(report.extensionGroups, Number(report.candidateBytes) || 0);
+        this.skipRows = this.skipModel(report.skipped || {});
+        const probe = report.cwdProbe || {};
+        this.tempProbeText = `Process paths: ${Number(probe.resolved) || 0}/${Number(probe.processes) || 0} resolved, ${Number(probe.failed) || 0} unreadable. Shielded in-root directories: ${Number(probe.tempDirs) || 0} process temp, ${Number(probe.programDirs) || 0} program image.`;
+        this.tempWarnings = this.joinWarnings(report.warnings);
+        const samples = Array.isArray(report.samples) ? report.samples : [];
+        this.sampleRows = samples.map((item, index) => ({
+            id: `sample-${index}`,
+            cells: [String(item.path || ""), `${Number(item.ageDays) || 0} d`, this.formatBytes(Number(item.bytes) || 0)],
+        }));
+        this.tempSamplesNote = report.samplesTruncated ? `Largest ${samples.length} of ${Number(report.candidateFiles) || 0} candidates are shown.` : `${samples.length} largest candidate(s).`;
+    }
+
+    applyTempResult(report) {
+        this.tempResultExists = true;
+        this.tempDeletedText = `${Number(report.deletedFiles) || 0} / ${Number(report.candidateFiles) || 0} files`;
+        this.tempFreedText = this.formatBytes(Number(report.freedBytes) || 0);
+        const skipped = report.skipped || {};
+        const failureCount = Array.isArray(report.failures) ? report.failures.length : 0;
+        this.tempSkippedText = `${Number(skipped.inUse) || 0} in use · ${failureCount} failed`;
+        this.tempResultWarnings = this.joinWarnings(report.warnings);
+        this.tempItemRows = this.itemRows(report.items);
+        this.status = `Execution finished: ${Number(report.deletedFiles) || 0} deleted, ${this.formatBytes(Number(report.freedBytes) || 0)} freed, ${failureCount} failed.`;
+    }
+
+    applyRootsPlan(report) {
+        this.rootsPlanExists = true;
+        this.rootsConfigText = String(report.configPath || "—");
+        const entries = Array.isArray(report.entries) ? report.entries : [];
+        const removable = entries.filter((entry) => Boolean(entry.removable));
+        this._removableRoots = removable.map((entry) => String(entry.path || ""));
+        this.rootsExecuteDisabled = !this._removableRoots.length;
+        this.rootsDeclaredText = `${entries.length} entries · ${this.formatBytes(Number(report.totalBytes) || 0)}`;
+        this.rootsRemovableText = `${removable.length} entries · ${this.formatBytes(Number(report.removableBytes) || 0)}`;
+        this.rootsWarnings = this.joinWarnings(report.warnings);
+        this.rootsRows = entries.map((entry, index) => ({
+            id: `root-${index}`,
+            cells: [
+                String(entry.path || ""),
+                String(Number(entry.line) || 0),
+                String(Number(entry.files) || 0),
+                this.formatBytes(Number(entry.bytes) || 0),
+                entry.removable ? `removable (${String(entry.authorization || "")})` : String(entry.skipReason || "skipped"),
+            ],
+        }));
+        if (!report.configExists) {
+            this.error = "The build-root config file does not exist. Declare absolute paths in the config before planning.";
+            this.status = "";
+        }
+    }
+
+    applyRootsResult(report) {
+        this.rootsResultExists = true;
+        this.rootsDeletedText = String(Number(report.deletedDirs) || 0);
+        this.rootsFreedText = this.formatBytes(Number(report.freedBytes) || 0);
+        this.rootsResultConfigText = String(report.configPath || "—");
+        this.rootsResultWarnings = this.joinWarnings(report.warnings);
+        const items = Array.isArray(report.items) ? report.items : [];
+        this.rootsItemRows = items.map((item, index) => ({
+            id: `root-item-${index}`,
+            cells: [
+                String(item.path || ""),
+                String(Number(item.line) || 0),
+                String(Number(item.files) || 0),
+                this.formatBytes(Number(item.bytes) || 0),
+                String(item.status || ""),
+                String(item.reason || "—"),
+            ],
+        }));
+        this._removableRoots = [];
+        this.rootsExecuteDisabled = true;
+        this.rootsPlanExists = false;
+        this.status = `Build roots finished: ${Number(report.deletedDirs) || 0} deleted, ${this.formatBytes(Number(report.freedBytes) || 0)} freed.`;
+    }
+
+    groupRows(groups, totalBytes) {
+        const list = Array.isArray(groups) ? groups : [];
+        return list.map((group, index) => ({
+            id: `group-${index}`,
+            cells: [
+                String(group.label || ""),
+                String(Number(group.files) || 0),
+                this.formatBytes(Number(group.bytes) || 0),
+                this.share(Number(group.bytes) || 0, totalBytes),
+            ],
+        }));
+    }
+
+    skipModel(skipped) {
+        return SKIP_REASONS.map((entry, index) => ({
+            id: `skip-${index}`,
+            cells: [entry[1], String(Number(skipped[entry[0]]) || 0)],
+        }));
+    }
+
+    itemRows(items) {
+        const list = Array.isArray(items) ? items : [];
+        const rank = { failed: 0, skipped: 1, deleted: 2 };
+        const sorted = list.slice().sort((a, b) => {
+            const left = rank[a.status] === undefined ? 3 : rank[a.status];
+            const right = rank[b.status] === undefined ? 3 : rank[b.status];
+            if (left !== right) return left - right;
+            return (Number(b.bytes) || 0) - (Number(a.bytes) || 0);
+        });
+        const shown = sorted.slice(0, ITEM_DISPLAY_LIMIT);
+        this.tempItemNote = sorted.length > ITEM_DISPLAY_LIMIT
+            ? `Showing the first ${ITEM_DISPLAY_LIMIT} of ${sorted.length} file outcomes. Failures and skips are listed first.`
+            : `${sorted.length} file outcome(s).`;
+        return shown.map((item, index) => ({
+            id: `item-${index}`,
+            cells: [
+                String(item.status || ""),
+                this.formatBytes(Number(item.bytes) || 0),
+                String(item.reason || "—"),
+                String(item.path || ""),
+            ],
+        }));
+    }
+
+    joinWarnings(warnings) {
+        const list = Array.isArray(warnings) ? warnings : [];
+        return list.length ? list.join("\n") : "";
+    }
+
+    share(bytes, total) {
+        if (!total) return "—";
+        return `${((bytes / total) * 100).toFixed(1)}%`;
     }
 
     formatBytes(n) {
