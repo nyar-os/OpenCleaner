@@ -91,6 +91,23 @@ const limitOption = {
     },
 };
 
+/**
+ * Numeric options fail on invalid input instead of falling back to a default.
+ * A silently defaulted threshold would change which files a `--yes` run deletes.
+ */
+function integerOption(key: string, minimum: number) {
+    return {
+        coerce: (raw: string | boolean | string[]): unknown => {
+            const text = typeof raw === 'string' ? raw.trim() : '';
+            const value = Number(text);
+            if (!text || !Number.isInteger(value) || value < minimum) {
+                throw new Error(`\`--${key}\` must be an integer >= ${minimum}, got \`${String(raw)}\``);
+            }
+            return String(value);
+        },
+    };
+}
+
 function deleteMode(raw: string | undefined, trashAvailable: boolean): DeleteMode {
     if (raw === 'permanent' || raw === 'trash') return raw;
     return trashAvailable ? 'trash' : 'permanent';
@@ -162,10 +179,10 @@ cli.command('dev', 'cli.cmd.dev')
     .option('--root <path>...', 'cli.opt.devRoot')
     .option('--include-global', 'cli.opt.includeGlobal')
     .option('--only <name>...', 'cli.opt.only')
-    .option('--max-depth <n>', 'cli.opt.maxDepth')
+    .option('--max-depth <n>', 'cli.opt.maxDepth', integerOption('max-depth', 0))
     .option('--limit <n>', 'cli.opt.limit', limitOption)
     .option('--mode <mode>', 'cli.opt.mode', { enum: ['trash', 'permanent'] })
-    .option('--concurrency <n>', 'cli.opt.concurrency', limitOption)
+    .option('--concurrency <n>', 'cli.opt.concurrency', integerOption('concurrency', 1))
     .option('--yes', 'cli.opt.yes')
     .actionCtx(async (options) => {
         applyActor(options);
@@ -371,8 +388,8 @@ cli.command('software', 'cli.cmd.software')
 
 cli.command('temp', 'cli.cmd.temp')
     .option('--root <path>', 'cli.opt.root')
-    .option('--older-than-days <n>', 'cli.opt.olderThanDays')
-    .option('--sample <n>', 'cli.opt.sample')
+    .option('--older-than-days <n>', 'cli.opt.olderThanDays', integerOption('older-than-days', 1))
+    .option('--sample <n>', 'cli.opt.sample', integerOption('sample', 0))
     .option('--yes', 'cli.opt.yes')
     .actionCtx(async (options) => {
         applyActor(options);
