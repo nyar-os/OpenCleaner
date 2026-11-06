@@ -301,6 +301,8 @@ export type TempSkips = {
     inUse: number;
     cwdShielded: number;
     processTemp: number;
+    /** Directories hosting the image of a running process. */
+    programShielded: number;
     unreadable: number;
 };
 
@@ -323,6 +325,8 @@ export type TempCwdProbe = {
     failed: number;
     /** In-root process temp directories excluded from the walk. */
     tempDirs: number;
+    /** In-root directories hosting a running process image. */
+    programDirs: number;
 };
 
 export type TempOptions = {
