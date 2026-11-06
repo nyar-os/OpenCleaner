@@ -25,8 +25,8 @@ pub use anchors::{
     BuildRootPlan, build_root_clean, build_root_config, build_root_plan, default_build_root_config, parse_build_root_config,
 };
 pub use dev::{
-    CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevPlan, DevPlanItem, DevProfile, DevScanOptions,
-    DevScanReport, DevStageTiming, RiskLevel, SkipReason, dev_clean, dev_plan, dev_scan,
+    CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevCleanTarget, DevPlan, DevPlanItem, DevProfile,
+    DevScanOptions, DevScanReport, DevSizeBaseline, DevStageTiming, RiskLevel, SizeSource, SkipReason, dev_clean, dev_plan, dev_scan,
 };
 pub use env::{
     EnvPathBackup, EnvPathCleanItem, EnvPathCleanOptions, EnvPathCleanReport, EnvPathCleanStatus, EnvPathEntry, EnvPathOptions, EnvPathReport,

@@ -207,15 +207,20 @@ cli.command('dev', 'cli.cmd.dev')
                 return 0;
             }
             const report = devClean({
-                paths: selected.map((item) => item.artifact.path),
+                targets: selected.map((item) => ({ path: item.artifact.path, baseline: item.artifact.baseline })),
                 mode: plan.mode,
                 confirm: true,
                 concurrency: numberOption(options, 'concurrency'),
             });
             for (const item of report.items) {
-                console.log(`${item.status.padEnd(9)}  ${formatBytes(item.bytes).padStart(10)}  ${item.path}${item.reason ? `  (${item.reason})` : ''}`);
+                const note = item.sizeSource === 'remeasured' ? '  [remeasured]' : '';
+                console.log(
+                    `${item.status.padEnd(9)}  ${formatBytes(item.bytes).padStart(10)}  ${item.path}${item.reason ? `  (${item.reason})` : ''}${note}`,
+                );
             }
-            console.log(`freed: ${formatBytes(report.freedBytes)}`);
+            console.log(
+                `freed: ${formatBytes(report.freedBytes)}  (scan-time ${formatBytes(report.freedBytesScanned)}, remeasured ${formatBytes(report.freedBytesRemeasured)})`,
+            );
             for (const warning of report.warnings) console.log(`warning: ${warning}`);
             const deleted = report.items.filter((item) => item.status === 'deleted' || item.status === 'trashed').length;
             printProfile('clean', report.profile, { bytes: report.freedBytes, items: deleted });

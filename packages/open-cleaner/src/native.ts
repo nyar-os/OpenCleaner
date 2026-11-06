@@ -68,6 +68,22 @@ export type RegistryResidueReport = {
 
 export type DevRiskLevel = 'project-local' | 'global-cache';
 
+/**
+ * What `bytes` was measured from. A later delete reuses the number while the
+ * artifact directory still matches this snapshot and measures again otherwise.
+ */
+export type DevSizeBaseline = {
+    bytes: number;
+    entries: number;
+    stamp: number;
+};
+
+/** One path handed to `devClean`, with its optional scan-time measurement. */
+export type DevCleanTarget = {
+    path: string;
+    baseline?: DevSizeBaseline | null;
+};
+
 /** A developer artifact candidate; every hit carries its rule and anchor. */
 export type DevArtifact = {
     path: string;
@@ -80,6 +96,7 @@ export type DevArtifact = {
     projectRoot?: string | null;
     volume?: string | null;
     crossVolume: boolean;
+    baseline?: DevSizeBaseline | null;
     warnings: string[];
 };
 
@@ -148,8 +165,8 @@ export type DevPlan = {
 };
 
 export type DevCleanOptions = {
-    /** Paths taken from a dry-run plan; each is re-validated before deletion. */
-    paths: string[];
+    /** Targets taken from a dry-run plan; each is re-validated before deletion. */
+    targets: DevCleanTarget[];
     mode?: DeleteMode;
     confirm: boolean;
     /** Cleanup workers. Defaults to 1 (serial), clamped to 1..=8. */
@@ -158,11 +175,15 @@ export type DevCleanOptions = {
 
 export type DevCleanStatus = 'deleted' | 'trashed' | 'skipped' | 'failed';
 
+/** Where an item's byte count came from. */
+export type DevSizeSource = 'scanned' | 'remeasured' | 'not-measured';
+
 export type DevCleanItem = {
     path: string;
     bytes: number;
     status: DevCleanStatus;
     reason?: string | null;
+    sizeSource: DevSizeSource;
 };
 
 export type DevCleanReport = {
@@ -170,6 +191,10 @@ export type DevCleanReport = {
     executed: boolean;
     items: DevCleanItem[];
     freedBytes: number;
+    /** Part of `freedBytes` reused from the scan-time measurement. */
+    freedBytesScanned: number;
+    /** Part of `freedBytes` measured again right before deletion. */
+    freedBytesRemeasured: number;
     warnings: string[];
     profile?: DevProfile | null;
 };

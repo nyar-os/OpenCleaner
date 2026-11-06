@@ -12,8 +12,9 @@
 //! ```
 //!
 //! Flags: `--root <dir>` reuses an existing corpus, `--keep` keeps a generated
-//! corpus, `--concurrency <n>` sets the clean worker count, `--phase scan`
-//! stops after the dry-run plan.
+//! corpus, `--concurrency <n>` sets the clean worker count, `--baseline <scan|none>`
+//! selects whether the delete reuses the scan-time size or measures every tree
+//! again, `--phase scan` stops after the dry-run plan.
 
 use std::{
     env,
@@ -30,6 +31,7 @@ fn main() {
     let args = args();
     let phase = args.get("--phase").cloned().unwrap_or_else(|| "all".to_string());
     let concurrency = args.get("--concurrency").and_then(|value| value.parse::<usize>().ok());
+    let baseline_mode = args.get("--baseline").cloned().unwrap_or_else(|| "scan".to_string());
     let keep = args.contains_key("--keep");
 
     let generated = !args.contains_key("--root");
@@ -69,9 +71,18 @@ fn main() {
         return;
     }
 
-    let selected: Vec<String> = plan.items.iter().filter(|item| item.removable).map(|item| item.artifact.path.clone()).collect();
-    let report = dev_clean(DevCleanOptions { paths: selected, mode: DeleteMode::Permanent, confirm: true, concurrency }).expect("clean");
-    report_clean(&report);
+    let selected: Vec<open_cleaner_core::DevCleanTarget> = plan
+        .items
+        .iter()
+        .filter(|item| item.removable)
+        .map(|item| open_cleaner_core::DevCleanTarget {
+            path: item.artifact.path.clone(),
+            baseline: if baseline_mode == "none" { None } else { item.artifact.baseline },
+        })
+        .collect();
+    let planned_bytes: u64 = plan.items.iter().filter(|item| item.removable).map(|item| item.artifact.bytes).sum();
+    let report = dev_clean(DevCleanOptions { targets: selected, mode: DeleteMode::Permanent, confirm: true, concurrency }).expect("clean");
+    report_clean(&report, planned_bytes, &baseline_mode);
 
     if generated && keep {
         println!("corpus kept at {}", root.display());
@@ -135,12 +146,21 @@ fn report_plan(plan: &open_cleaner_core::DevPlan) {
     }
 }
 
-fn report_clean(report: &open_cleaner_core::DevCleanReport) {
+fn report_clean(report: &open_cleaner_core::DevCleanReport, planned_bytes: u64, baseline_mode: &str) {
     println!("\n== clean ==");
     let deleted = report.items.iter().filter(|item| matches!(item.status, open_cleaner_core::CleanStatus::Deleted)).count();
     let skipped = report.items.iter().filter(|item| matches!(item.status, open_cleaner_core::CleanStatus::Skipped)).count();
     let failed = report.items.iter().filter(|item| matches!(item.status, open_cleaner_core::CleanStatus::Failed)).count();
     println!("deleted {deleted}  skipped {skipped}  failed {failed}  freed {}", report.freed_bytes);
+    println!(
+        "policy: baseline={baseline_mode}  freed scanned {}  freed remeasured {}",
+        report.freed_bytes_scanned, report.freed_bytes_remeasured
+    );
+    println!(
+        "freed vs plan bytes: {} (freed {} / plan {planned_bytes})",
+        if report.freed_bytes == planned_bytes { "PASS" } else { "FAIL" },
+        report.freed_bytes
+    );
     for item in &report.items {
         if matches!(item.status, open_cleaner_core::CleanStatus::Failed | open_cleaner_core::CleanStatus::Skipped) {
             println!("{:?}: {}  {}", item.status, item.path, item.reason.clone().unwrap_or_default());
@@ -148,7 +168,7 @@ fn report_clean(report: &open_cleaner_core::DevCleanReport) {
     }
     if let Some(profile) = &report.profile {
         stages(profile);
-        let delete_ms = profile.stages.iter().filter(|stage| stage.name == "delete").map(|stage| stage.elapsed_ms).sum::<f64>();
+        let delete_ms = stage_ms(profile, "delete");
         println!(
             "delete: {}/s  {:.1} items/s",
             human(report.freed_bytes as f64 / (delete_ms / 1000.0).max(f64::EPSILON)),

@@ -109,6 +109,40 @@ struct SizeStats {
     bytes: u64,
     dirs: u64,
     files: u64,
+    /// Snapshot of the measured directory's own entries. Absent when the
+    /// listing itself failed, which forces a re-measure at delete time.
+    stamp: Option<DirStamp>,
+}
+
+/// Entry count plus a digest of one directory's immediate entries: name, kind,
+/// size and modified time. Cheap to re-derive, so a delete can prove that the
+/// directory did not change since it was measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirStamp {
+    entries: u64,
+    digest: u64,
+}
+
+/// Scan-time measurement handed back to `dev_clean`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevSizeBaseline {
+    /// Bytes measured during the scan.
+    pub bytes: u64,
+    /// Immediate entry count of the artifact directory when it was measured.
+    pub entries: u64,
+    /// Digest of those entries. A mismatch means "measure again".
+    pub stamp: u64,
+}
+
+/// One path handed to `dev_clean`, optionally carrying its scan-time size.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevCleanTarget {
+    pub path: String,
+    /// When the artifact directory still matches `baseline`, the delete reuses
+    /// the scan-time bytes instead of walking the tree again. Without a
+    /// baseline the tree is always measured again.
+    #[serde(default)]
+    pub baseline: Option<DevSizeBaseline>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -137,6 +171,10 @@ pub struct DevArtifact {
     pub volume: Option<String>,
     /// The artifact lives on a different volume than its anchor/scan root.
     pub cross_volume: bool,
+    /// What `bytes` was measured from, so `dev_clean` can reuse it when the
+    /// directory has not changed in between.
+    #[serde(default)]
+    pub baseline: Option<DevSizeBaseline>,
     pub warnings: Vec<String>,
 }
 
@@ -209,9 +247,9 @@ pub struct DevPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevCleanOptions {
-    /// Paths taken from a dry-run plan. They are re-validated against the
+    /// Targets taken from a dry-run plan. Every one is re-validated against the
     /// filesystem before anything is deleted.
-    pub paths: Vec<String>,
+    pub targets: Vec<DevCleanTarget>,
     pub mode: DeleteMode,
     pub confirm: bool,
     /// Cleanup workers. Defaults to 1 (serial) and is clamped to 1..=8. Values
@@ -229,12 +267,27 @@ pub enum CleanStatus {
     Failed,
 }
 
+/// Where an item's byte count came from. Audit output must keep this visible:
+/// a reused number was measured before the delete, not during it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SizeSource {
+    /// Reused the scan-time measurement after the entry snapshot matched.
+    Scanned,
+    /// Measured again immediately before deletion because the directory
+    /// changed, or because no scan-time baseline was supplied.
+    Remeasured,
+    /// No measurement: the candidate failed a gate before sizing.
+    NotMeasured,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevCleanItem {
     pub path: String,
     pub bytes: u64,
     pub status: CleanStatus,
     pub reason: Option<String>,
+    pub size_source: SizeSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +297,10 @@ pub struct DevCleanReport {
     pub executed: bool,
     pub items: Vec<DevCleanItem>,
     pub freed_bytes: u64,
+    /// Part of `freed_bytes` reused from the scan-time measurement.
+    pub freed_bytes_scanned: u64,
+    /// Part of `freed_bytes` measured again right before deletion.
+    pub freed_bytes_remeasured: u64,
     pub warnings: Vec<String>,
     pub profile: Option<DevProfile>,
 }
@@ -308,6 +365,23 @@ pub fn dev_plan(options: DevScanOptions, mode: DeleteMode) -> Result<DevPlan> {
 }
 
 pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
+    dev_clean_with(options, &base_dirs(), &default_remover)
+}
+
+/// The real removal. Kept behind a seam so a test can inject a failing delete
+/// instead of waiting for the host to produce a lock.
+fn default_remover(path: &Path, mode: DeleteMode) -> Result<CleanStatus> {
+    match mode {
+        DeleteMode::Trash => trash::trash_path(path).map(|()| CleanStatus::Trashed),
+        DeleteMode::Permanent => trash::remove_permanently(path).map(|()| CleanStatus::Deleted),
+    }
+}
+
+fn dev_clean_with(
+    options: DevCleanOptions,
+    dirs: &BaseDirs,
+    remove: &(dyn Fn(&Path, DeleteMode) -> Result<CleanStatus> + Sync),
+) -> Result<DevCleanReport> {
     if !options.confirm {
         return Err(Error::Message("dev clean requires explicit confirmation (confirm=true)".to_string()));
     }
@@ -315,8 +389,7 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
         return Err(Error::not_implemented("dev-trash"));
     }
 
-    let dirs = base_dirs();
-    let total = options.paths.len();
+    let total = options.targets.len();
     let degree = clean_concurrency(options.concurrency).min(total.max(1));
 
     // Tasks are dispatched dynamically so a single large tree never blocks the
@@ -327,6 +400,7 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
     let stripes: Vec<Mutex<()>> = (0..PARENT_STRIPES).map(|_| Mutex::new(())).collect();
     let profile_on = profiling_enabled();
     let validate_nanos = AtomicU64::new(0);
+    let measure_nanos = AtomicU64::new(0);
     let delete_nanos = AtomicU64::new(0);
     let peak = PeakSample::default();
 
@@ -335,62 +409,78 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
             scope.spawn(|| {
                 let mut outcomes = Vec::new();
                 let mut validate = Duration::ZERO;
+                let mut measure = Duration::ZERO;
                 let mut delete = Duration::ZERO;
                 loop {
                     let index = cursor.fetch_add(1, Ordering::Relaxed);
-                    let Some(raw) = options.paths.get(index)
+                    let Some(target) = options.targets.get(index)
                     else {
                         break;
                     };
 
-                    let path = PathBuf::from(raw);
+                    let path = PathBuf::from(&target.path);
                     let stripe = &stripes[parent_stripe(&path)];
                     let _stripe_guard = stripe.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-                    // Gates first, then delete. The probe-to-delete window is
-                    // one item wide instead of one whole batch.
+                    // 1. Cheap safety gates only. The occupancy probe is not
+                    // part of them: it stays next to the removal.
                     let validate_start = profile_on.then(Instant::now);
-                    let artifact = artifact_for_clean(&path, &dirs);
-                    let skip = artifact.as_ref().and_then(|artifact| evaluate(artifact, &dirs));
+                    let skip = gate_path(&path, dirs).or_else(|| resolve_artifact(&path, dirs).err());
                     if let Some(start) = validate_start {
                         validate += start.elapsed();
                     }
-
-                    let Some(artifact) = artifact
-                    else {
-                        outcomes.push(CleanOutcome {
-                            index,
-                            item: DevCleanItem {
-                                path: raw.clone(),
-                                bytes: 0,
-                                status: CleanStatus::Skipped,
-                                reason: Some("unverified-path".to_string()),
-                            },
-                            warning: None,
-                        });
-                        peak.sample();
-                        continue;
-                    };
                     if let Some(reason) = skip {
                         outcomes.push(CleanOutcome {
                             index,
                             item: DevCleanItem {
-                                path: raw.clone(),
-                                bytes: artifact.bytes,
+                                path: target.path.clone(),
+                                bytes: target.baseline.map_or(0, |baseline| baseline.bytes),
                                 status: CleanStatus::Skipped,
                                 reason: Some(reason.as_str().to_string()),
+                                size_source: SizeSource::NotMeasured,
                             },
-                            warning: None,
+                            warnings: Vec::new(),
                         });
                         peak.sample();
                         continue;
                     }
 
-                    let delete_start = profile_on.then(Instant::now);
-                    let result = match options.mode {
-                        DeleteMode::Trash => trash::trash_path(&path).map(|()| CleanStatus::Trashed),
-                        DeleteMode::Permanent => trash::remove_permanently(&path).map(|()| CleanStatus::Deleted),
+                    // 2. Size. A scan-time number is reused when the directory
+                    // still shows the same entries, so an unchanged tree is
+                    // never walked twice. Anything else is measured again.
+                    let measure_start = profile_on.then(Instant::now);
+                    let mut item_warnings = Vec::new();
+                    let (bytes, size_source) = match target.baseline {
+                        Some(baseline) if stamp_matches(&path, &baseline) => (baseline.bytes, SizeSource::Scanned),
+                        _ => (dir_size(&path, &mut item_warnings).bytes, SizeSource::Remeasured),
                     };
+                    if let Some(start) = measure_start {
+                        measure += start.elapsed();
+                    }
+
+                    // 3. Probe then delete, back to back. The window in which
+                    // another process can take the directory is one item wide.
+                    let delete_start = profile_on.then(Instant::now);
+                    if probe_in_use(&path) {
+                        if let Some(start) = delete_start {
+                            delete += start.elapsed();
+                        }
+                        outcomes.push(CleanOutcome {
+                            index,
+                            item: DevCleanItem {
+                                path: target.path.clone(),
+                                bytes,
+                                status: CleanStatus::Skipped,
+                                reason: Some(SkipReason::InUseOrLocked.as_str().to_string()),
+                                size_source,
+                            },
+                            warnings: item_warnings,
+                        });
+                        peak.sample();
+                        continue;
+                    }
+
+                    let result = remove(&path, options.mode);
                     if let Some(start) = delete_start {
                         delete += start.elapsed();
                     }
@@ -400,18 +490,22 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
                     let (status, reason, warning) = match result {
                         Ok(status) if !path.exists() => (status, None, None),
                         Ok(_) => (CleanStatus::Failed, Some("path still exists after deletion".to_string()), None),
-                        Err(err) => (CleanStatus::Failed, Some(err.to_string()), Some(format!("{raw}: {err}"))),
+                        Err(err) => (CleanStatus::Failed, Some(err.to_string()), Some(format!("{}: {err}", target.path))),
                     };
+                    if let Some(warning) = warning {
+                        item_warnings.push(warning);
+                    }
                     outcomes.push(CleanOutcome {
                         index,
-                        item: DevCleanItem { path: raw.clone(), bytes: artifact.bytes, status, reason },
-                        warning,
+                        item: DevCleanItem { path: target.path.clone(), bytes, status, reason, size_source },
+                        warnings: item_warnings,
                     });
                     peak.sample();
                 }
 
                 results.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend(outcomes);
                 validate_nanos.fetch_add(validate.as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+                measure_nanos.fetch_add(measure.as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
                 delete_nanos.fetch_add(delete.as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
             });
         }
@@ -422,9 +516,7 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
 
     let mut warnings = Vec::new();
     for outcome in &outcomes {
-        if let Some(warning) = &outcome.warning {
-            warnings.push(warning.clone());
-        }
+        warnings.extend(outcome.warnings.iter().cloned());
     }
     let items: Vec<DevCleanItem> = outcomes.into_iter().map(|outcome| outcome.item).collect();
     let freed_bytes = items
@@ -432,22 +524,42 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
         .filter(|item| matches!(item.status, CleanStatus::Deleted | CleanStatus::Trashed))
         .map(|item| item.bytes)
         .fold(0u64, u64::saturating_add);
+    let freed_bytes_scanned = items
+        .iter()
+        .filter(|item| matches!(item.status, CleanStatus::Deleted | CleanStatus::Trashed) && item.size_source == SizeSource::Scanned)
+        .map(|item| item.bytes)
+        .fold(0u64, u64::saturating_add);
+    let freed_bytes_remeasured = items
+        .iter()
+        .filter(|item| matches!(item.status, CleanStatus::Deleted | CleanStatus::Trashed) && item.size_source == SizeSource::Remeasured)
+        .map(|item| item.bytes)
+        .fold(0u64, u64::saturating_add);
 
     let mut profile = profile_on.then(DevProfile::default);
     if let Some(profile) = profile.as_mut() {
         profile.add("validate", Duration::from_nanos(validate_nanos.load(Ordering::Relaxed)));
+        profile.add("measure", Duration::from_nanos(measure_nanos.load(Ordering::Relaxed)));
         profile.add("delete", Duration::from_nanos(delete_nanos.load(Ordering::Relaxed)));
         profile.peak_working_set_bytes = peak.working_set();
         profile.peak_handle_count = peak.handles();
     }
 
-    Ok(DevCleanReport { mode: options.mode, executed: true, items, freed_bytes, warnings, profile })
+    Ok(DevCleanReport {
+        mode: options.mode,
+        executed: true,
+        items,
+        freed_bytes,
+        freed_bytes_scanned,
+        freed_bytes_remeasured,
+        warnings,
+        profile,
+    })
 }
 
 struct CleanOutcome {
     index: usize,
     item: DevCleanItem,
-    warning: Option<String>,
+    warnings: Vec<String>,
 }
 
 /// Requested worker count, clamped so small or slow volumes are not flooded.
@@ -686,6 +798,7 @@ impl Collector<'_> {
             project_root: Some(root.display().to_string()),
             volume,
             cross_volume,
+            baseline: baseline_of(&stats),
             warnings,
         };
         self.artifacts.insert(key, artifact);
@@ -742,11 +855,17 @@ impl Collector<'_> {
                 project_root: None,
                 volume,
                 cross_volume,
+                baseline: baseline_of(&stats),
                 warnings,
             };
             self.artifacts.insert(key, artifact);
         }
     }
+}
+
+/// The scan-time number plus the evidence needed to trust it later.
+fn baseline_of(stats: &SizeStats) -> Option<DevSizeBaseline> {
+    stats.stamp.map(|stamp| DevSizeBaseline { bytes: stats.bytes, entries: stamp.entries, stamp: stamp.digest })
 }
 
 fn os_eq_ignore_ascii(name: &std::ffi::OsStr, expected: &str) -> bool {
@@ -781,8 +900,10 @@ fn resolve_roots(input: &[String]) -> Result<Vec<PathBuf>> {
     Ok(roots)
 }
 
-fn evaluate(artifact: &DevArtifact, dirs: &BaseDirs) -> Option<SkipReason> {
-    let path = Path::new(&artifact.path);
+/// Path-only safety gates: never a repository or SDK root, never a link, and
+/// always a directory. Cheap enough to run for every item right before the
+/// probe.
+fn gate_path(path: &Path, dirs: &BaseDirs) -> Option<SkipReason> {
     if rules::is_protected(path) || is_base_dir(path, dirs) {
         return Some(SkipReason::ProtectedPath);
     }
@@ -795,6 +916,31 @@ fn evaluate(artifact: &DevArtifact, dirs: &BaseDirs) -> Option<SkipReason> {
     }
     if !meta.is_dir() {
         return Some(SkipReason::NotADirectory);
+    }
+    None
+}
+
+/// Execution-time rule gate: the path must still be justified by an anchor in
+/// its owning project, or be a declared level-2 cache. Re-derived from the
+/// filesystem so a caller cannot hand in an arbitrary directory.
+fn resolve_artifact(path: &Path, dirs: &BaseDirs) -> std::result::Result<(), SkipReason> {
+    if !path.is_absolute() {
+        return Err(SkipReason::RuleMismatch);
+    }
+    if let Some((rule, root)) = rules::match_rule_suffix(path) {
+        if !rules::detect_manifests(&root).contains(&rule.anchor) {
+            return Err(SkipReason::ManifestMissing);
+        }
+        return Ok(());
+    }
+    let specs = global::specs(dirs);
+    if specs.iter().any(|spec| spec.path == path) { Ok(()) } else { Err(SkipReason::RuleMismatch) }
+}
+
+fn evaluate(artifact: &DevArtifact, dirs: &BaseDirs) -> Option<SkipReason> {
+    let path = Path::new(&artifact.path);
+    if let Some(reason) = gate_path(path, dirs) {
+        return Some(reason);
     }
 
     if artifact.level == 1 {
@@ -863,57 +1009,12 @@ fn probe_in_use(path: &Path) -> bool {
     fs::rename(&probe, path).is_err()
 }
 
-fn artifact_for_clean(path: &Path, dirs: &BaseDirs) -> Option<DevArtifact> {
-    if !path.is_absolute() {
-        return None;
-    }
-    if let Some((rule, root)) = rules::resolve_project_artifact(path) {
-        let mut warnings = Vec::new();
-        let bytes = dir_size(path, &mut warnings).bytes;
-        let volume = platform::volume_of(path);
-        let root_volume = platform::volume_of(&root);
-        let cross_volume = match (&volume, &root_volume) {
-            (Some(a), Some(b)) => a != b,
-            _ => false,
-        };
-        return Some(DevArtifact {
-            path: path.display().to_string(),
-            bytes,
-            level: 1,
-            risk: RiskLevel::ProjectLocal,
-            ecosystem: rule.ecosystem,
-            rule: format!("{} → {}/", rule.anchor.id(), rule.artifact),
-            anchor: rule.anchor.id().to_string(),
-            project_root: Some(root.display().to_string()),
-            volume,
-            cross_volume,
-            warnings,
-        });
-    }
-
-    let specs = global::specs(dirs);
-    let spec = specs.iter().find(|spec| spec.path == path)?;
-    let mut warnings = Vec::new();
-    let bytes = dir_size(path, &mut warnings).bytes;
-    Some(DevArtifact {
-        path: path.display().to_string(),
-        bytes,
-        level: 2,
-        risk: RiskLevel::GlobalCache,
-        ecosystem: spec.ecosystem,
-        rule: spec.rule.to_string(),
-        anchor: spec.anchor.id().to_string(),
-        project_root: None,
-        volume: platform::volume_of(path),
-        cross_volume: false,
-        warnings,
-    })
-}
-
 fn dir_size(path: &Path, warnings: &mut Vec<String>) -> SizeStats {
     let mut stats = SizeStats::default();
     let mut stack = vec![path.to_path_buf()];
+    let mut first = true;
     while let Some(dir) = stack.pop() {
+        let is_root = std::mem::take(&mut first);
         stats.dirs += 1;
         let Ok(read) = fs::read_dir(&dir)
         else {
@@ -922,6 +1023,7 @@ fn dir_size(path: &Path, warnings: &mut Vec<String>) -> SizeStats {
             }
             continue;
         };
+        let mut stamp = Vec::new();
         for item in read.flatten() {
             // `DirEntry::metadata` does not follow symlinks and reuses the
             // attributes already carried by the directory listing, so measured
@@ -930,6 +1032,9 @@ fn dir_size(path: &Path, warnings: &mut Vec<String>) -> SizeStats {
             else {
                 continue;
             };
+            if is_root {
+                stamp.push(stamp_entry(&item, &meta));
+            }
             if platform::is_link_like(&meta) {
                 continue;
             }
@@ -941,8 +1046,84 @@ fn dir_size(path: &Path, warnings: &mut Vec<String>) -> SizeStats {
                 stats.bytes = stats.bytes.saturating_add(meta.len());
             }
         }
+        if is_root {
+            stats.stamp = Some(stamp_of(stamp));
+        }
     }
     stats
+}
+
+/// One immediate entry of an artifact directory. Kept as raw bytes so the
+/// digest is stable across names that cannot be rendered as UTF-8.
+struct StampEntry {
+    name: Vec<u8>,
+    kind: u8,
+    len: u64,
+    modified: u64,
+}
+
+fn stamp_entry(item: &fs::DirEntry, meta: &fs::Metadata) -> StampEntry {
+    let kind = if platform::is_link_like(meta) {
+        2
+    }
+    else if meta.is_dir() {
+        1
+    }
+    else {
+        0
+    };
+    // Only files carry a timestamp. NTFS updates directory timestamps lazily,
+    // so a directory written moments ago can still report a different time on
+    // the next read, which would turn fresh trees into false "changed" hits.
+    let modified = if kind == 0 {
+        meta.modified().ok().and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok()).map_or(0, |age| age.as_nanos() as u64)
+    }
+    else {
+        0
+    };
+    StampEntry { name: item.file_name().as_encoded_bytes().to_vec(), kind, len: meta.len(), modified }
+}
+
+/// Order-independent digest: entries are sorted by name first, so the same
+/// directory always produces the same stamp.
+fn stamp_of(mut entries: Vec<StampEntry>) -> DirStamp {
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut digest = 0xcbf2_9ce4_8422_2325u64;
+    for entry in &entries {
+        digest = fnv1a_step(digest, &entry.name);
+        digest = fnv1a_step(digest, &[entry.kind]);
+        digest = fnv1a_step(digest, &entry.len.to_le_bytes());
+        digest = fnv1a_step(digest, &entry.modified.to_le_bytes());
+    }
+    DirStamp { entries: entries.len() as u64, digest }
+}
+
+fn fnv1a_step(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+/// Stamp of one directory's immediate entries. One listing, no recursion: the
+/// caller compares it with a scan-time stamp to decide between reusing and
+/// re-measuring.
+fn dir_stamp(dir: &Path) -> Option<DirStamp> {
+    let read = fs::read_dir(dir).ok()?;
+    let mut entries = Vec::new();
+    for item in read.flatten() {
+        let Ok(meta) = item.metadata()
+        else {
+            continue;
+        };
+        entries.push(stamp_entry(&item, &meta));
+    }
+    Some(stamp_of(entries))
+}
+
+fn stamp_matches(path: &Path, baseline: &DevSizeBaseline) -> bool {
+    dir_stamp(path).is_some_and(|stamp| stamp.entries == baseline.entries && stamp.digest == baseline.stamp)
 }
 
 fn epoch_millis() -> u64 {
@@ -985,6 +1166,11 @@ mod tests {
             data_dir: Some(root.join("data")),
             cargo_home: Some(root.join("home").join(".cargo")),
         }
+    }
+
+    /// A target without a scan-time baseline: the tree must be measured again.
+    fn target(path: &Path) -> DevCleanTarget {
+        DevCleanTarget { path: path.display().to_string(), baseline: None }
     }
 
     #[test]
@@ -1102,6 +1288,7 @@ mod tests {
             project_root: None,
             volume: None,
             cross_volume: false,
+            baseline: None,
             warnings: Vec::new(),
         };
         assert_eq!(evaluate(&lockfile, &base(&root)), Some(SkipReason::ProtectedPath));
@@ -1130,7 +1317,7 @@ mod tests {
         touch(&source.join("Cargo.toml"), 8);
 
         let err = dev_clean(DevCleanOptions {
-            paths: vec![source.join("target").display().to_string()],
+            targets: vec![target(&source.join("target"))],
             mode: DeleteMode::Permanent,
             confirm: false,
             concurrency: None,
@@ -1141,13 +1328,9 @@ mod tests {
 
         let outside = root.join("outside");
         fs::create_dir_all(&outside).unwrap();
-        let report = dev_clean(DevCleanOptions {
-            paths: vec![outside.display().to_string()],
-            mode: DeleteMode::Permanent,
-            confirm: true,
-            concurrency: None,
-        })
-        .unwrap();
+        let report =
+            dev_clean(DevCleanOptions { targets: vec![target(&outside)], mode: DeleteMode::Permanent, confirm: true, concurrency: None })
+                .unwrap();
         assert_eq!(report.items[0].status, CleanStatus::Skipped);
         assert!(outside.exists(), "unverified path must survive");
 
@@ -1162,21 +1345,153 @@ mod tests {
         touch(&root.join("app").join("target").join("debug").join("a.bin"), 300);
         touch(&root.join("app").join("src").join("main.rs"), 32);
 
-        let target = root.join("app").join("target");
-        let report = dev_clean(DevCleanOptions {
-            paths: vec![target.display().to_string()],
-            mode: DeleteMode::Permanent,
-            confirm: true,
-            concurrency: None,
-        })
-        .unwrap();
+        let target_path = root.join("app").join("target");
+        let report =
+            dev_clean(DevCleanOptions { targets: vec![target(&target_path)], mode: DeleteMode::Permanent, confirm: true, concurrency: None })
+                .unwrap();
 
         assert_eq!(report.items.len(), 1);
         assert_eq!(report.items[0].status, CleanStatus::Deleted);
+        assert_eq!(report.items[0].size_source, SizeSource::Remeasured);
         assert_eq!(report.items[0].bytes, 300);
         assert_eq!(report.freed_bytes, 300);
-        assert!(!target.exists());
+        assert!(!target_path.exists());
         assert!(root.join("app").join("src").join("main.rs").exists(), "sources must survive");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_reuses_the_scan_size_while_the_directory_is_unchanged() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("size-reuse");
+        let app = root.join("app");
+        touch(&app.join("Cargo.toml"), 8);
+        touch(&app.join("target").join("debug").join("a.bin"), 300);
+        touch(&app.join("target").join("deps").join("b.bin"), 700);
+
+        let scan = dev_scan_with(
+            DevScanOptions { roots: vec![root.display().to_string()], include_global: false, max_depth: None, limit: None },
+            &base(&root),
+        )
+        .unwrap();
+        let artifact = scan.artifacts.into_iter().find(|artifact| artifact.path.ends_with("target")).unwrap();
+        assert_eq!(artifact.bytes, 1_000);
+        let baseline = artifact.baseline.expect("the scan records a baseline");
+        assert_eq!(baseline.bytes, artifact.bytes);
+
+        let artifact_path = PathBuf::from(&artifact.path);
+        assert_eq!(dir_size(&artifact_path, &mut Vec::new()).bytes, baseline.bytes, "reuse must agree with a fresh walk");
+
+        let report = dev_clean_with(
+            DevCleanOptions {
+                targets: vec![DevCleanTarget { path: artifact.path.clone(), baseline: Some(baseline) }],
+                mode: DeleteMode::Permanent,
+                confirm: true,
+                concurrency: None,
+            },
+            &base(&root),
+            &default_remover,
+        )
+        .unwrap();
+
+        assert_eq!(report.items[0].status, CleanStatus::Deleted);
+        assert_eq!(report.items[0].size_source, SizeSource::Scanned);
+        assert_eq!(report.items[0].bytes, 1_000);
+        assert_eq!(report.freed_bytes, 1_000);
+        assert_eq!(report.freed_bytes_scanned, 1_000, "the audit labels a reused number");
+        assert_eq!(report.freed_bytes_remeasured, 0);
+        assert!(!artifact_path.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_remeasures_the_size_after_the_directory_changed() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("size-change");
+        let app = root.join("app");
+        touch(&app.join("Cargo.toml"), 8);
+        touch(&app.join("target").join("debug").join("a.bin"), 300);
+
+        let scan = dev_scan_with(
+            DevScanOptions { roots: vec![root.display().to_string()], include_global: false, max_depth: None, limit: None },
+            &base(&root),
+        )
+        .unwrap();
+        let artifact = scan.artifacts.into_iter().find(|artifact| artifact.path.ends_with("target")).unwrap();
+        let baseline = artifact.baseline.expect("the scan records a baseline");
+        assert_eq!(baseline.bytes, 300);
+
+        // Something wrote into the artifact after the scan, so the scan-time
+        // number is stale and must not be reused.
+        touch(&app.join("target").join("late.bin"), 900);
+
+        let report = dev_clean_with(
+            DevCleanOptions {
+                targets: vec![DevCleanTarget { path: artifact.path.clone(), baseline: Some(baseline) }],
+                mode: DeleteMode::Permanent,
+                confirm: true,
+                concurrency: None,
+            },
+            &base(&root),
+            &default_remover,
+        )
+        .unwrap();
+
+        assert_eq!(report.items[0].status, CleanStatus::Deleted);
+        assert_eq!(report.items[0].size_source, SizeSource::Remeasured);
+        assert_eq!(report.items[0].bytes, 1_200);
+        assert_eq!(report.freed_bytes, 1_200);
+        assert_eq!(report.freed_bytes_remeasured, 1_200);
+        assert_eq!(report.freed_bytes_scanned, 0, "a changed directory is never labelled scanned");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn failing_delete_is_recorded_per_item_and_the_batch_continues() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("injected-failure");
+        let mut targets = Vec::new();
+        for project in 0..4 {
+            let app = root.join(format!("app{project}"));
+            touch(&app.join("Cargo.toml"), 8);
+            touch(&app.join("target").join("a.bin"), 128);
+            targets.push(target(&app.join("target")));
+        }
+
+        let failing = PathBuf::from(&targets[1].path);
+        let lying = PathBuf::from(&targets[2].path);
+        let report = dev_clean_with(
+            DevCleanOptions { targets, mode: DeleteMode::Permanent, confirm: true, concurrency: Some(2) },
+            &base(&root),
+            &|path: &Path, mode: DeleteMode| {
+                if path == failing.as_path() {
+                    return Err(crate::Error::Message("injected delete failure".to_string()));
+                }
+                if path == lying.as_path() {
+                    // Claiming success without removing anything must be caught.
+                    return Ok(CleanStatus::Deleted);
+                }
+                default_remover(path, mode)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.items.len(), 4);
+        assert_eq!(
+            report.items.iter().map(|item| item.status).collect::<Vec<_>>(),
+            vec![CleanStatus::Deleted, CleanStatus::Failed, CleanStatus::Failed, CleanStatus::Deleted],
+            "a failing item must not stop the batch"
+        );
+        assert!(report.items[1].reason.as_deref().is_some_and(|reason| reason.contains("injected delete failure")));
+        assert_eq!(report.items[2].reason.as_deref(), Some("path still exists after deletion"));
+        assert_eq!(report.warnings.len(), 1, "each failure is recorded once: {:?}", report.warnings);
+        assert!(report.warnings[0].contains("injected delete failure"));
+        assert_eq!(report.freed_bytes, 256, "failed items contribute no freed bytes");
+        assert!(failing.exists(), "a failed item must survive");
+        assert!(lying.exists());
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1185,7 +1500,7 @@ mod tests {
     #[test]
     fn trash_mode_fails_explicitly_outside_windows() {
         let err = dev_clean(DevCleanOptions {
-            paths: vec![std::env::temp_dir().display().to_string()],
+            targets: vec![target(&std::env::temp_dir())],
             mode: DeleteMode::Trash,
             confirm: true,
             concurrency: None,
@@ -1227,7 +1542,7 @@ mod tests {
         let _guard = FIXTURE_LOCK.lock().unwrap();
         let root = fixture("concurrent-clean");
 
-        let mut paths = Vec::new();
+        let mut targets = Vec::new();
         let mut expected = 0u64;
         for project in 0..8 {
             let app = root.join(format!("app{project}"));
@@ -1235,26 +1550,29 @@ mod tests {
             for index in 0..5 {
                 touch(&app.join("target").join("debug").join(format!("f{index}.bin")), 256);
             }
-            paths.push(app.join("target").display().to_string());
+            targets.push(target(&app.join("target")));
             expected += 5 * 256;
 
             // Two artifacts sharing one parent exercise the sibling stripe.
             touch(&app.join("package.json"), 16);
             touch(&app.join("node_modules").join("dep").join("index.js"), 512);
             touch(&app.join("dist").join("bundle.js"), 128);
-            paths.push(app.join("node_modules").display().to_string());
-            paths.push(app.join("dist").display().to_string());
+            targets.push(target(&app.join("node_modules")));
+            targets.push(target(&app.join("dist")));
             expected += 512 + 128;
         }
 
-        let report =
-            dev_clean(DevCleanOptions { paths: paths.clone(), mode: DeleteMode::Permanent, confirm: true, concurrency: Some(4) }).unwrap();
+        let task_count = targets.len();
+        let target_paths: Vec<String> = targets.iter().map(|item| item.path.clone()).collect();
+        let report = dev_clean(DevCleanOptions { targets, mode: DeleteMode::Permanent, confirm: true, concurrency: Some(4) }).unwrap();
 
-        assert_eq!(report.items.len(), paths.len());
+        assert_eq!(report.items.len(), task_count);
         assert!(report.items.iter().all(|item| item.status == CleanStatus::Deleted), "{:?}", report.items);
         assert_eq!(report.freed_bytes, expected);
+        assert_eq!(report.freed_bytes_remeasured, expected);
+        assert_eq!(report.freed_bytes_scanned, 0);
         for (index, item) in report.items.iter().enumerate() {
-            assert_eq!(item.path, paths[index], "results stay in input order");
+            assert_eq!(item.path, target_paths[index], "results stay in input order");
             assert!(!Path::new(&item.path).exists(), "{} survived", item.path);
         }
 
@@ -1271,11 +1589,11 @@ mod tests {
         let app = root.join("app");
         touch(&app.join("Cargo.toml"), 8);
         touch(&app.join("target").join("debug").join("a.bin"), 256);
-        let target = app.join("target");
+        let target_path = app.join("target");
 
-        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(target.join("debug").join("a.bin")).unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(target_path.join("debug").join("a.bin")).unwrap();
         let report = dev_clean(DevCleanOptions {
-            paths: vec![target.display().to_string()],
+            targets: vec![target(&target_path)],
             mode: DeleteMode::Permanent,
             confirm: true,
             concurrency: Some(2),
@@ -1283,19 +1601,20 @@ mod tests {
         .unwrap();
         assert_eq!(report.items[0].status, CleanStatus::Skipped);
         assert_eq!(report.items[0].reason.as_deref(), Some("in-use-or-locked"));
-        assert!(target.exists(), "an occupied artifact must survive");
+        assert_eq!(report.items[0].size_source, SizeSource::Remeasured);
+        assert!(target_path.exists(), "an occupied artifact must survive");
         assert_eq!(report.freed_bytes, 0);
         drop(lock);
 
         let report = dev_clean(DevCleanOptions {
-            paths: vec![target.display().to_string()],
+            targets: vec![target(&target_path)],
             mode: DeleteMode::Permanent,
             confirm: true,
             concurrency: Some(2),
         })
         .unwrap();
         assert_eq!(report.items[0].status, CleanStatus::Deleted);
-        assert!(!target.exists());
+        assert!(!target_path.exists());
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1309,8 +1628,8 @@ mod tests {
         touch(&store.join("data.bin"), 4_096);
         let app = root.join("app");
         touch(&app.join("Cargo.toml"), 8);
-        let target = app.join("target");
-        if std::os::windows::fs::symlink_dir(&store, &target).is_err() {
+        let target_path = app.join("target");
+        if std::os::windows::fs::symlink_dir(&store, &target_path).is_err() {
             // A host without symlink privilege cannot exercise this gate.
             let _ = fs::remove_dir_all(&root);
             return;
@@ -1324,7 +1643,7 @@ mod tests {
         assert!(report.artifacts.is_empty(), "a linked artifact must not be reported: {:?}", report.artifacts);
 
         let report = dev_clean(DevCleanOptions {
-            paths: vec![target.display().to_string()],
+            targets: vec![target(&target_path)],
             mode: DeleteMode::Permanent,
             confirm: true,
             concurrency: Some(2),
@@ -1332,10 +1651,10 @@ mod tests {
         .unwrap();
         assert_eq!(report.items[0].status, CleanStatus::Skipped);
         assert_eq!(report.items[0].reason.as_deref(), Some("symlink-not-followed"));
-        assert!(target.exists(), "the link itself must survive");
+        assert!(target_path.exists(), "the link itself must survive");
         assert!(store.join("data.bin").exists(), "the link target must survive");
 
-        fs::remove_dir(&target).unwrap();
+        fs::remove_dir(&target_path).unwrap();
         let _ = fs::remove_dir_all(&root);
     }
 

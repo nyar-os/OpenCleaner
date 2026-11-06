@@ -13,10 +13,10 @@ mod audit;
 use std::{cell::RefCell, path::PathBuf};
 
 use open_cleaner_core::{
-    BuildRootCleanOptions, BuildRootOptions, CapabilityState, DeleteMode, DevCleanOptions, DevScanOptions, EnvPathCleanOptions,
-    EnvPathOptions, Error as CoreError, RegistryOptions, RegistryResidueOptions, ScanOptions, SoftwareOptions, TempCleanOptions,
-    TempOptions, build_root_clean, build_root_config, build_root_plan, capabilities, dev_clean, dev_plan, dev_scan, env_path_clean,
-    env_path_scan, registry_residue_scan, registry_scan, scan, software_residue_scan, temp_clean, temp_plan,
+    BuildRootCleanOptions, BuildRootOptions, CapabilityState, DeleteMode, DevCleanOptions, DevScanOptions, EnvPathCleanOptions, EnvPathOptions,
+    Error as CoreError, RegistryOptions, RegistryResidueOptions, ScanOptions, SoftwareOptions, TempCleanOptions, TempOptions, build_root_clean,
+    build_root_config, build_root_plan, capabilities, dev_clean, dev_plan, dev_scan, env_path_clean, env_path_scan, registry_residue_scan,
+    registry_scan, scan, software_residue_scan, temp_clean, temp_plan,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -753,7 +753,10 @@ fn audited_dev_clean(options: DevCleanOptions, params: Value) -> Result<open_cle
     audit::run("dev-clean", Mode::Execute, params, || {
         let report = dev_clean(options)?;
         let count = report.items.len() as u64;
-        let summary = format!("{count} items, {} bytes freed", report.freed_bytes);
+        let summary = format!(
+            "{count} items, {} bytes freed ({} scanned-time, {} remeasured)",
+            report.freed_bytes, report.freed_bytes_scanned, report.freed_bytes_remeasured
+        );
         Ok((report, audit::Summary::new(count, summary)))
     })
     .map_err(core_error)
