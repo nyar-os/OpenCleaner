@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::locations::base_dirs;
-use crate::safety::{self, RECENT_WRITE_MS};
-use crate::{Error, Result};
+use crate::{
+    Error, Result,
+    locations::base_dirs,
+    safety::{self, RECENT_WRITE_MS},
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BuildRootOptions {
@@ -92,7 +94,9 @@ pub fn default_build_root_config() -> Option<PathBuf> {
 fn resolve_config(config: Option<&str>) -> Result<PathBuf> {
     match config {
         Some(value) if !value.trim().is_empty() => Ok(PathBuf::from(value.trim())),
-        _ => default_build_root_config().ok_or_else(|| Error::Message("build-roots: no config path and no platform data directory".to_string())),
+        _ => {
+            default_build_root_config().ok_or_else(|| Error::Message("build-roots: no config path and no platform data directory".to_string()))
+        }
     }
 }
 
@@ -170,7 +174,8 @@ pub fn build_root_plan(options: BuildRootOptions) -> Result<BuildRootPlan> {
         let key = safety::path_key(&path);
         let skip_reason = if let Some((_, first_line)) = seen.iter().find(|(value, _)| *value == key) {
             Some(format!("duplicate declaration, first declared at line {first_line}"))
-        } else {
+        }
+        else {
             seen.push((key, declaration.line));
             evaluate(&path).err()
         };
@@ -190,9 +195,11 @@ pub fn build_root_plan(options: BuildRootOptions) -> Result<BuildRootPlan> {
         plan.total_bytes = plan.total_bytes.saturating_add(usage.bytes);
         if safety::probe_dir_in_use(&path) {
             entry.skip_reason = Some("a process holds this directory open".to_string());
-        } else if usage.newest_unix_ms.is_some_and(|stamp| safety::now_unix_ms().saturating_sub(stamp) < RECENT_WRITE_MS) {
+        }
+        else if usage.newest_unix_ms.is_some_and(|stamp| safety::now_unix_ms().saturating_sub(stamp) < RECENT_WRITE_MS) {
             entry.skip_reason = Some("written within the last 10 minutes".to_string());
-        } else {
+        }
+        else {
             entry.removable = true;
             plan.removable_bytes = plan.removable_bytes.saturating_add(usage.bytes);
         }

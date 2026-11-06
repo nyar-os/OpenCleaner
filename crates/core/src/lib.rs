@@ -15,9 +15,9 @@ mod error;
 pub mod locations;
 pub mod platform;
 pub mod registry;
+mod safety;
 pub mod scan;
 pub mod software;
-mod safety;
 pub mod temp;
 
 pub use anchors::{
