@@ -75,7 +75,8 @@ export type DevRiskLevel = 'project-local' | 'global-cache';
 export type DevSizeBaseline = {
     bytes: number;
     entries: number;
-    stamp: number;
+    /** Hex digest of the directory listing, kept as text to stay exact. */
+    stamp: string;
 };
 
 /** One path handed to `devClean`, with its optional scan-time measurement. */

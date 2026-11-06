@@ -131,14 +131,16 @@ struct DirStamp {
 }
 
 /// Scan-time measurement handed back to `dev_clean`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DevSizeBaseline {
     /// Bytes measured during the scan.
     pub bytes: u64,
     /// Immediate entry count of the artifact directory when it was measured.
     pub entries: u64,
-    /// Digest of those entries. A mismatch means "measure again".
-    pub stamp: u64,
+    /// Hex digest of those entries. A mismatch means "measure again".
+    /// Encoded as text because a 64-bit value does not survive the round trip
+    /// through a host number that only holds 53 bits of precision.
+    pub stamp: String,
 }
 
 /// One path handed to `dev_clean`, optionally carrying its scan-time size.
@@ -441,7 +443,7 @@ fn dev_clean_with(
                             index,
                             item: DevCleanItem {
                                 path: target.path.clone(),
-                                bytes: target.baseline.map_or(0, |baseline| baseline.bytes),
+                                bytes: target.baseline.as_ref().map_or(0, |baseline| baseline.bytes),
                                 status: CleanStatus::Skipped,
                                 reason: Some(reason.as_str().to_string()),
                                 size_source: SizeSource::NotMeasured,
@@ -457,8 +459,8 @@ fn dev_clean_with(
                     // never walked twice. Anything else is measured again.
                     let measure_start = profile_on.then(Instant::now);
                     let mut item_warnings = Vec::new();
-                    let (bytes, size_source) = match target.baseline {
-                        Some(baseline) if stamp_matches(&path, &baseline) => (baseline.bytes, SizeSource::Scanned),
+                    let (bytes, size_source) = match &target.baseline {
+                        Some(baseline) if stamp_matches(&path, baseline) => (baseline.bytes, SizeSource::Scanned),
                         _ => (dir_size(&path, &mut item_warnings).bytes, SizeSource::Remeasured),
                     };
                     if let Some(start) = measure_start {
@@ -883,7 +885,11 @@ impl Collector<'_> {
 
 /// The scan-time number plus the evidence needed to trust it later.
 fn baseline_of(stats: &SizeStats) -> Option<DevSizeBaseline> {
-    stats.stamp.map(|stamp| DevSizeBaseline { bytes: stats.bytes, entries: stamp.entries, stamp: stamp.digest })
+    stats.stamp.map(|stamp| DevSizeBaseline { bytes: stats.bytes, entries: stamp.entries, stamp: hex_digest(stamp.digest) })
+}
+
+fn hex_digest(digest: u64) -> String {
+    format!("{digest:016x}")
 }
 
 fn os_eq_ignore_ascii(name: &std::ffi::OsStr, expected: &str) -> bool {
@@ -1146,7 +1152,7 @@ fn dir_stamp(dir: &Path) -> Option<DirStamp> {
 }
 
 fn stamp_matches(path: &Path, baseline: &DevSizeBaseline) -> bool {
-    dir_stamp(path).is_some_and(|stamp| stamp.entries == baseline.entries && stamp.digest == baseline.stamp)
+    dir_stamp(path).is_some_and(|stamp| stamp.entries == baseline.entries && hex_digest(stamp.digest) == baseline.stamp)
 }
 
 fn epoch_millis() -> u64 {
@@ -1461,6 +1467,22 @@ mod tests {
         assert_eq!(report.freed_bytes_scanned, 1_000, "the audit labels a reused number");
         assert_eq!(report.freed_bytes_remeasured, 0);
         assert!(!artifact_path.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn baseline_digest_survives_a_json_round_trip() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("baseline-json");
+        let artifact = root.join("artifact");
+        touch(&artifact.join("a.bin"), 100);
+        touch(&artifact.join("nested").join("b.bin"), 40);
+
+        let baseline = baseline_of(&dir_size(&artifact, &mut Vec::new())).expect("the root listing records a stamp");
+        let json = serde_json::to_string(&baseline).unwrap();
+        let restored: DevSizeBaseline = serde_json::from_str(&json).unwrap();
+        assert!(stamp_matches(&artifact, &restored), "the digest must survive the host round trip: {json}");
 
         let _ = fs::remove_dir_all(&root);
     }
