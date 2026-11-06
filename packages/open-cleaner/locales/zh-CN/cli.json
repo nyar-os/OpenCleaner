@@ -19,6 +19,7 @@
             "only": "只选择该名称的产物目录：多个名称可重复该旗标或用逗号分隔，例如 --only target,node_modules",
             "maxDepth": "查找项目清单时的最大目录深度",
             "mode": "删除方式：trash 保留回收站副本，permanent 不可恢复",
+            "concurrency": "清理并发数：默认 1（串行），限制在 1..=8；只有在高延迟磁盘上提高并发才有意义",
             "yes": "执行已选改动，而不是只打印预览",
             "scope": "PATH 作用域：user 或 machine",
             "index": "dry-run 报告中的 PATH 条目序号（可重复）",

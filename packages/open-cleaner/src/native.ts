@@ -152,6 +152,8 @@ export type DevCleanOptions = {
     paths: string[];
     mode?: DeleteMode;
     confirm: boolean;
+    /** Cleanup workers. Defaults to 1 (serial), clamped to 1..=8. */
+    concurrency?: number;
 };
 
 export type DevCleanStatus = 'deleted' | 'trashed' | 'skipped' | 'failed';

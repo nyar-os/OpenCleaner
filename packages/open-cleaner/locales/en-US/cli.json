@@ -19,6 +19,7 @@
             "only": "Only select artifact directories with this name. Repeat the flag or use commas for several names, for example --only target,node_modules",
             "maxDepth": "Maximum directory depth when looking for project manifests",
             "mode": "Delete mode: trash keeps a recycle-bin copy, permanent cannot be undone",
+            "concurrency": "Cleanup workers. Default 1 (serial), clamped to 1..=8. More workers only help on high-latency volumes",
             "yes": "Execute the selected changes instead of printing a preview",
             "scope": "PATH scope: user or machine",
             "index": "PATH entry index from the dry-run report (repeatable)",

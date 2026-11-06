@@ -46,25 +46,47 @@ impl ManifestKind {
         }
     }
 
-    fn from_file_name(name: &str) -> Option<Self> {
-        let lower = name.to_ascii_lowercase();
-        let kind = match lower.as_str() {
-            "cargo.toml" => Self::CargoToml,
-            "package.json" => Self::PackageJson,
-            "pnpm-lock.yaml" => Self::PnpmLock,
-            "yarn.lock" => Self::YarnLock,
-            "package-lock.json" => Self::PackageLock,
-            "pyproject.toml" => Self::PyProject,
-            "go.mod" => Self::GoMod,
-            "build.gradle" | "build.gradle.kts" | "settings.gradle" | "settings.gradle.kts" => Self::Gradle,
-            "pom.xml" => Self::Maven,
-            "gemfile" => Self::Gemfile,
-            "packages.config" => Self::Nuget,
-            _ if lower.ends_with(".csproj") || lower.ends_with(".sln") => Self::Nuget,
-            _ => return None,
-        };
-        Some(kind)
+    /// Case-insensitive manifest match without allocating a lowercase copy.
+    fn from_name_ci(name: &str) -> Option<Self> {
+        const NAMES: &[(&str, ManifestKind)] = &[
+            ("cargo.toml", ManifestKind::CargoToml),
+            ("package.json", ManifestKind::PackageJson),
+            ("pnpm-lock.yaml", ManifestKind::PnpmLock),
+            ("yarn.lock", ManifestKind::YarnLock),
+            ("package-lock.json", ManifestKind::PackageLock),
+            ("pyproject.toml", ManifestKind::PyProject),
+            ("go.mod", ManifestKind::GoMod),
+            ("build.gradle", ManifestKind::Gradle),
+            ("build.gradle.kts", ManifestKind::Gradle),
+            ("settings.gradle", ManifestKind::Gradle),
+            ("settings.gradle.kts", ManifestKind::Gradle),
+            ("pom.xml", ManifestKind::Maven),
+            ("gemfile", ManifestKind::Gemfile),
+            ("packages.config", ManifestKind::Nuget),
+        ];
+        for (candidate, kind) in NAMES {
+            if name.eq_ignore_ascii_case(candidate) {
+                return Some(*kind);
+            }
+        }
+        if ends_with_ignore_ascii(name, ".csproj") || ends_with_ignore_ascii(name, ".sln") {
+            return Some(Self::Nuget);
+        }
+        None
     }
+
+    /// Manifest detection from a directory entry name. Non-UTF-8 names fall
+    /// back to a lossy comparison; manifests are ASCII in practice.
+    pub fn from_os_name(name: &OsStr) -> Option<Self> {
+        match name.to_str() {
+            Some(text) => Self::from_name_ci(text),
+            None => Self::from_name_ci(&name.to_string_lossy()),
+        }
+    }
+}
+
+fn ends_with_ignore_ascii(name: &str, suffix: &str) -> bool {
+    name.len() >= suffix.len() && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -161,8 +183,13 @@ const PROTECTED_NAMES: &[&str] = &[
 ];
 
 pub fn should_skip_descend(name: &OsStr) -> bool {
-    let lower = name.to_string_lossy().to_ascii_lowercase();
-    SKIP_DESCEND.contains(&lower.as_str())
+    match name.to_str() {
+        Some(text) => SKIP_DESCEND.iter().any(|candidate| text.eq_ignore_ascii_case(candidate)),
+        None => {
+            let text = name.to_string_lossy();
+            SKIP_DESCEND.iter().any(|candidate| text.eq_ignore_ascii_case(candidate))
+        }
+    }
 }
 
 /// Reject paths that must never be deleted: repositories, manifests,
@@ -193,7 +220,7 @@ pub fn detect_manifests(dir: &Path) -> Vec<ManifestKind> {
         if !file_type.is_file() {
             continue;
         }
-        if let Some(kind) = ManifestKind::from_file_name(&item.file_name().to_string_lossy()) {
+        if let Some(kind) = ManifestKind::from_os_name(&item.file_name()) {
             found.insert(kind);
         }
     }

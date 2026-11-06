@@ -11,7 +11,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 
@@ -24,6 +27,16 @@ use crate::{
 };
 
 use self::rules::{Ecosystem, ManifestKind, ProjectRule};
+
+/// Default cleanup workers. Serial on purpose: on a local volume the metadata
+/// work of deletion is already serialized, and parallel measurement of one
+/// artifact interleaving with deletion of another measured slower at every
+/// worker count above one. High-latency volumes can opt in via `concurrency`.
+const DEFAULT_CLEAN_CONCURRENCY: usize = 1;
+/// Upper bound for a caller-supplied worker count.
+const MAX_CLEAN_CONCURRENCY: usize = 8;
+/// Parent-directory lock stripes. Siblings hash to one stripe and serialize.
+const PARENT_STRIPES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -201,6 +214,10 @@ pub struct DevCleanOptions {
     pub paths: Vec<String>,
     pub mode: DeleteMode,
     pub confirm: bool,
+    /// Cleanup workers. Defaults to 1 (serial) and is clamped to 1..=8. Values
+    /// above 1 only help when probe latency dominates a slow volume.
+    #[serde(default)]
+    pub concurrency: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,75 +316,191 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
     }
 
     let dirs = base_dirs();
-    let mut items = Vec::with_capacity(options.paths.len());
-    let mut warnings = Vec::new();
-    let mut freed_bytes = 0u64;
-    let mut profile = profiling_enabled().then(DevProfile::default);
-    let mut validate = Duration::ZERO;
-    let mut delete = Duration::ZERO;
+    let total = options.paths.len();
+    let degree = clean_concurrency(options.concurrency).min(total.max(1));
 
-    for raw in options.paths {
-        let path = PathBuf::from(&raw);
-        let validate_start = profile.as_ref().map(|_| Instant::now());
-        let artifact = artifact_for_clean(&path, &dirs);
-        let skip = artifact.as_ref().and_then(|artifact| evaluate(artifact, &dirs));
-        if let Some(start) = validate_start {
-            validate += start.elapsed();
-        }
-        let Some(artifact) = artifact
-        else {
-            items.push(DevCleanItem { path: raw.clone(), bytes: 0, status: CleanStatus::Skipped, reason: Some("unverified-path".to_string()) });
-            continue;
-        };
-        if let Some(reason) = skip {
-            items.push(DevCleanItem {
-                path: raw,
-                bytes: artifact.bytes,
-                status: CleanStatus::Skipped,
-                reason: Some(reason.as_str().to_string()),
-            });
-            continue;
-        }
+    // Tasks are dispatched dynamically so a single large tree never blocks the
+    // remaining work, and siblings under one parent share a stripe so two
+    // deletions never race for the same directory handle.
+    let cursor = AtomicUsize::new(0);
+    let results = Mutex::new(Vec::with_capacity(total));
+    let stripes: Vec<Mutex<()>> = (0..PARENT_STRIPES).map(|_| Mutex::new(())).collect();
+    let profile_on = profiling_enabled();
+    let validate_nanos = AtomicU64::new(0);
+    let delete_nanos = AtomicU64::new(0);
+    let peak = PeakSample::default();
 
-        let delete_start = profile.as_ref().map(|_| Instant::now());
-        let result = match options.mode {
-            DeleteMode::Trash => trash::trash_path(&path).map(|()| CleanStatus::Trashed),
-            DeleteMode::Permanent => trash::remove_permanently(&path).map(|()| CleanStatus::Deleted),
-        };
-        if let Some(start) = delete_start {
-            delete += start.elapsed();
-        }
-        match result {
-            Ok(status) => {
-                if path.exists() {
-                    items.push(DevCleanItem {
-                        path: raw,
-                        bytes: artifact.bytes,
-                        status: CleanStatus::Failed,
-                        reason: Some("path still exists after deletion".to_string()),
+    std::thread::scope(|scope| {
+        for _ in 0..degree {
+            scope.spawn(|| {
+                let mut outcomes = Vec::new();
+                let mut validate = Duration::ZERO;
+                let mut delete = Duration::ZERO;
+                loop {
+                    let index = cursor.fetch_add(1, Ordering::Relaxed);
+                    let Some(raw) = options.paths.get(index)
+                    else {
+                        break;
+                    };
+
+                    let path = PathBuf::from(raw);
+                    let stripe = &stripes[parent_stripe(&path)];
+                    let _stripe_guard = stripe.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+                    // Gates first, then delete. The probe-to-delete window is
+                    // one item wide instead of one whole batch.
+                    let validate_start = profile_on.then(Instant::now);
+                    let artifact = artifact_for_clean(&path, &dirs);
+                    let skip = artifact.as_ref().and_then(|artifact| evaluate(artifact, &dirs));
+                    if let Some(start) = validate_start {
+                        validate += start.elapsed();
+                    }
+
+                    let Some(artifact) = artifact
+                    else {
+                        outcomes.push(CleanOutcome {
+                            index,
+                            item: DevCleanItem {
+                                path: raw.clone(),
+                                bytes: 0,
+                                status: CleanStatus::Skipped,
+                                reason: Some("unverified-path".to_string()),
+                            },
+                            warning: None,
+                        });
+                        peak.sample();
+                        continue;
+                    };
+                    if let Some(reason) = skip {
+                        outcomes.push(CleanOutcome {
+                            index,
+                            item: DevCleanItem {
+                                path: raw.clone(),
+                                bytes: artifact.bytes,
+                                status: CleanStatus::Skipped,
+                                reason: Some(reason.as_str().to_string()),
+                            },
+                            warning: None,
+                        });
+                        peak.sample();
+                        continue;
+                    }
+
+                    let delete_start = profile_on.then(Instant::now);
+                    let result = match options.mode {
+                        DeleteMode::Trash => trash::trash_path(&path).map(|()| CleanStatus::Trashed),
+                        DeleteMode::Permanent => trash::remove_permanently(&path).map(|()| CleanStatus::Deleted),
+                    };
+                    if let Some(start) = delete_start {
+                        delete += start.elapsed();
+                    }
+
+                    // One failing item never stops the batch and is always
+                    // reported individually.
+                    let (status, reason, warning) = match result {
+                        Ok(status) if !path.exists() => (status, None, None),
+                        Ok(_) => (CleanStatus::Failed, Some("path still exists after deletion".to_string()), None),
+                        Err(err) => (CleanStatus::Failed, Some(err.to_string()), Some(format!("{raw}: {err}"))),
+                    };
+                    outcomes.push(CleanOutcome {
+                        index,
+                        item: DevCleanItem { path: raw.clone(), bytes: artifact.bytes, status, reason },
+                        warning,
                     });
-                    continue;
+                    peak.sample();
                 }
-                freed_bytes = freed_bytes.saturating_add(artifact.bytes);
-                items.push(DevCleanItem { path: raw, bytes: artifact.bytes, status, reason: None });
-            }
-            Err(err) => {
-                warnings.push(format!("{raw}: {err}"));
-                items.push(DevCleanItem { path: raw, bytes: artifact.bytes, status: CleanStatus::Failed, reason: Some(err.to_string()) });
-            }
+
+                results.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend(outcomes);
+                validate_nanos.fetch_add(validate.as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+                delete_nanos.fetch_add(delete.as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+            });
         }
-        if let Some(profile) = profile.as_mut() {
-            profile.sample_peak();
+    });
+
+    let mut outcomes = results.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
+    outcomes.sort_by_key(|outcome| outcome.index);
+
+    let mut warnings = Vec::new();
+    for outcome in &outcomes {
+        if let Some(warning) = &outcome.warning {
+            warnings.push(warning.clone());
         }
     }
+    let items: Vec<DevCleanItem> = outcomes.into_iter().map(|outcome| outcome.item).collect();
+    let freed_bytes = items
+        .iter()
+        .filter(|item| matches!(item.status, CleanStatus::Deleted | CleanStatus::Trashed))
+        .map(|item| item.bytes)
+        .fold(0u64, u64::saturating_add);
 
+    let mut profile = profile_on.then(DevProfile::default);
     if let Some(profile) = profile.as_mut() {
-        profile.add("validate", validate);
-        profile.add("delete", delete);
-        profile.sample_peak();
+        profile.add("validate", Duration::from_nanos(validate_nanos.load(Ordering::Relaxed)));
+        profile.add("delete", Duration::from_nanos(delete_nanos.load(Ordering::Relaxed)));
+        profile.peak_working_set_bytes = peak.working_set();
+        profile.peak_handle_count = peak.handles();
     }
 
     Ok(DevCleanReport { mode: options.mode, executed: true, items, freed_bytes, warnings, profile })
+}
+
+struct CleanOutcome {
+    index: usize,
+    item: DevCleanItem,
+    warning: Option<String>,
+}
+
+/// Requested worker count, clamped so small or slow volumes are not flooded.
+fn clean_concurrency(requested: Option<usize>) -> usize {
+    requested.unwrap_or(DEFAULT_CLEAN_CONCURRENCY).clamp(1, MAX_CLEAN_CONCURRENCY)
+}
+
+/// Stable shard key for the parent directory of an artifact. Siblings resolve
+/// to the same stripe and are serialized, everything else runs in parallel.
+fn parent_stripe(path: &Path) -> usize {
+    let parent = path.parent().unwrap_or(path);
+    (fnv1a(parent.as_os_str().as_encoded_bytes()) % PARENT_STRIPES as u64) as usize
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(byte.to_ascii_lowercase());
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+#[derive(Default)]
+struct PeakSample {
+    working_set: AtomicU64,
+    handles: AtomicU32,
+}
+
+impl PeakSample {
+    fn sample(&self) {
+        let (working_set, handles) = platform::process_peak_usage();
+        if let Some(bytes) = working_set {
+            self.working_set.fetch_max(bytes, Ordering::Relaxed);
+        }
+        if let Some(count) = handles {
+            self.handles.fetch_max(count, Ordering::Relaxed);
+        }
+    }
+
+    fn working_set(&self) -> Option<u64> {
+        match self.working_set.load(Ordering::Relaxed) {
+            0 => None,
+            bytes => Some(bytes),
+        }
+    }
+
+    fn handles(&self) -> Option<u32> {
+        match self.handles.load(Ordering::Relaxed) {
+            0 => None,
+            count => Some(count),
+        }
+    }
 }
 
 fn dev_scan_with(options: DevScanOptions, dirs: &BaseDirs) -> Result<DevScanReport> {
@@ -394,7 +527,7 @@ fn dev_scan_with(options: DevScanOptions, dirs: &BaseDirs) -> Result<DevScanRepo
     let profile = collector.profile.map(|profile| {
         let mut report =
             DevProfile { dirs_visited: profile.dirs, files_visited: profile.files, bytes_measured: profile.bytes, ..DevProfile::default() };
-        report.add("discovery", profile.walk.saturating_sub(profile.measure));
+        report.add("scan", profile.walk);
         report.add("measurement", profile.measure);
         report.sample_peak();
         report
@@ -433,38 +566,69 @@ struct Collector<'a> {
 }
 
 impl Collector<'_> {
+    /// One dive per directory. The listing answers three questions at once:
+    /// which anchors live here, which subdirectories exist, and which of them
+    /// may be an artifact. Source files that are not manifests are never
+    /// stat'ed.
     fn walk(&mut self, dir: &Path, depth: usize, max_depth: usize) {
         let started = self.profile.as_ref().map(|_| Instant::now());
-        let manifests = rules::detect_manifests(dir);
+        let mut manifests = BTreeSet::new();
+        let mut children: Vec<PathBuf> = Vec::new();
+        let mut unreadable = false;
+
+        match fs::read_dir(dir) {
+            Ok(read) => {
+                for item in read.flatten() {
+                    let Ok(file_type) = item.file_type()
+                    else {
+                        continue;
+                    };
+                    if file_type.is_dir() {
+                        // Reparse points are never descended into.
+                        let path = item.path();
+                        let Ok(meta) = item.metadata()
+                        else {
+                            continue;
+                        };
+                        if !meta.is_dir() || platform::is_link_like(&meta) {
+                            continue;
+                        }
+                        children.push(path);
+                    }
+                    else if file_type.is_file()
+                        && let Some(kind) = ManifestKind::from_os_name(&item.file_name())
+                    {
+                        manifests.insert(kind);
+                    }
+                }
+            }
+            Err(_) => unreadable = true,
+        }
+
         if !manifests.is_empty() {
             self.scanned_projects += 1;
             for manifest in &manifests {
                 self.anchors.insert(*manifest);
                 for rule in rules::project_rules(*manifest) {
-                    self.add_project_artifact(dir, rule);
+                    self.add_project_artifact(dir, &children, rule);
                 }
             }
         }
 
-        if depth < max_depth
-            && let Ok(read) = fs::read_dir(dir)
-        {
-            for item in read.flatten() {
-                let Ok(meta) = fs::symlink_metadata(item.path())
+        if unreadable {
+            self.warnings.push(format!("cannot read {}; subtree skipped", dir.display()));
+        }
+        if depth < max_depth {
+            for child in &children {
+                let Some(name) = child.file_name()
                 else {
                     continue;
                 };
-                if !meta.is_dir() || platform::is_link_like(&meta) {
+                if rules::should_skip_descend(name) {
                     continue;
                 }
-                if rules::should_skip_descend(&item.file_name()) {
-                    continue;
-                }
-                self.walk(&item.path(), depth + 1, max_depth);
+                self.walk(child, depth + 1, max_depth);
             }
-        }
-        else if depth < max_depth {
-            self.warnings.push(format!("cannot read {}; subtree skipped", dir.display()));
         }
 
         if let (Some(profile), Some(start)) = (self.profile.as_mut(), started) {
@@ -473,8 +637,20 @@ impl Collector<'_> {
         }
     }
 
-    fn add_project_artifact(&mut self, root: &Path, rule: &'static ProjectRule) {
-        let path = rules::artifact_path(root, rule.artifact);
+    fn add_project_artifact(&mut self, root: &Path, children: &[PathBuf], rule: &'static ProjectRule) {
+        let mut parts = rule.artifact.split('/');
+        let first = parts.next().unwrap_or(rule.artifact);
+        let path = if parts.next().is_some() {
+            rules::artifact_path(root, rule.artifact)
+        }
+        else {
+            let Some(child) = children.iter().find(|child| child.file_name().is_some_and(|name| os_eq_ignore_ascii(name, first)))
+            else {
+                return;
+            };
+            child.clone()
+        };
+
         let Ok(meta) = fs::symlink_metadata(&path)
         else {
             return;
@@ -491,14 +667,7 @@ impl Collector<'_> {
         }
 
         let mut warnings = Vec::new();
-        let measure_start = self.profile.as_ref().map(|_| Instant::now());
-        let stats = dir_size(&path, &mut warnings);
-        if let (Some(profile), Some(start)) = (self.profile.as_mut(), measure_start) {
-            profile.measure += start.elapsed();
-            profile.dirs += stats.dirs;
-            profile.files += stats.files;
-            profile.bytes += stats.bytes;
-        }
+        let stats = self.measure(&path, &mut warnings);
         let bytes = stats.bytes;
         let volume = platform::volume_of(&path);
         let root_volume = platform::volume_of(root);
@@ -522,6 +691,21 @@ impl Collector<'_> {
         self.artifacts.insert(key, artifact);
     }
 
+    /// Size one artifact subtree in a single dive. Every artifact found during
+    /// the walk is measured exactly once, and the measurement is not skipped
+    /// for subtrees that did not become candidates.
+    fn measure(&mut self, path: &Path, warnings: &mut Vec<String>) -> SizeStats {
+        let started = self.profile.as_ref().map(|_| Instant::now());
+        let stats = dir_size(path, warnings);
+        if let (Some(profile), Some(start)) = (self.profile.as_mut(), started) {
+            profile.measure += start.elapsed();
+            profile.dirs += stats.dirs;
+            profile.files += stats.files;
+            profile.bytes += stats.bytes;
+        }
+        stats
+    }
+
     fn collect_global(&mut self) {
         let specs = global::specs(self.dirs);
         for spec in specs {
@@ -540,14 +724,7 @@ impl Collector<'_> {
                 continue;
             }
             let mut warnings = Vec::new();
-            let measure_start = self.profile.as_ref().map(|_| Instant::now());
-            let stats = dir_size(&spec.path, &mut warnings);
-            if let (Some(profile), Some(start)) = (self.profile.as_mut(), measure_start) {
-                profile.measure += start.elapsed();
-                profile.dirs += stats.dirs;
-                profile.files += stats.files;
-                profile.bytes += stats.bytes;
-            }
+            let stats = self.measure(&spec.path, &mut warnings);
             let bytes = stats.bytes;
             let volume = platform::volume_of(&spec.path);
             let cross_volume = match (&volume, &self.root_volume) {
@@ -569,6 +746,13 @@ impl Collector<'_> {
             };
             self.artifacts.insert(key, artifact);
         }
+    }
+}
+
+fn os_eq_ignore_ascii(name: &std::ffi::OsStr, expected: &str) -> bool {
+    match name.to_str() {
+        Some(text) => text.eq_ignore_ascii_case(expected),
+        None => name.to_string_lossy().eq_ignore_ascii_case(expected),
     }
 }
 
@@ -739,7 +923,10 @@ fn dir_size(path: &Path, warnings: &mut Vec<String>) -> SizeStats {
             continue;
         };
         for item in read.flatten() {
-            let Ok(meta) = fs::symlink_metadata(item.path())
+            // `DirEntry::metadata` does not follow symlinks and reuses the
+            // attributes already carried by the directory listing, so measured
+            // files cost no extra path allocation or stat on Windows.
+            let Ok(meta) = item.metadata()
             else {
                 continue;
             };
@@ -946,6 +1133,7 @@ mod tests {
             paths: vec![source.join("target").display().to_string()],
             mode: DeleteMode::Permanent,
             confirm: false,
+            concurrency: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("confirmation"), "{err}");
@@ -953,8 +1141,13 @@ mod tests {
 
         let outside = root.join("outside");
         fs::create_dir_all(&outside).unwrap();
-        let report =
-            dev_clean(DevCleanOptions { paths: vec![outside.display().to_string()], mode: DeleteMode::Permanent, confirm: true }).unwrap();
+        let report = dev_clean(DevCleanOptions {
+            paths: vec![outside.display().to_string()],
+            mode: DeleteMode::Permanent,
+            confirm: true,
+            concurrency: None,
+        })
+        .unwrap();
         assert_eq!(report.items[0].status, CleanStatus::Skipped);
         assert!(outside.exists(), "unverified path must survive");
 
@@ -970,8 +1163,13 @@ mod tests {
         touch(&root.join("app").join("src").join("main.rs"), 32);
 
         let target = root.join("app").join("target");
-        let report =
-            dev_clean(DevCleanOptions { paths: vec![target.display().to_string()], mode: DeleteMode::Permanent, confirm: true }).unwrap();
+        let report = dev_clean(DevCleanOptions {
+            paths: vec![target.display().to_string()],
+            mode: DeleteMode::Permanent,
+            confirm: true,
+            concurrency: None,
+        })
+        .unwrap();
 
         assert_eq!(report.items.len(), 1);
         assert_eq!(report.items[0].status, CleanStatus::Deleted);
@@ -986,10 +1184,159 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn trash_mode_fails_explicitly_outside_windows() {
-        let err =
-            dev_clean(DevCleanOptions { paths: vec![std::env::temp_dir().display().to_string()], mode: DeleteMode::Trash, confirm: true })
-                .unwrap_err();
+        let err = dev_clean(DevCleanOptions {
+            paths: vec![std::env::temp_dir().display().to_string()],
+            mode: DeleteMode::Trash,
+            confirm: true,
+            concurrency: None,
+        })
+        .unwrap_err();
         assert_eq!(crate::capability_code(&err), Some("not_implemented"), "{err}");
+    }
+
+    #[test]
+    fn artifact_sizing_covers_nested_content_without_becoming_projects() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("sizing");
+        let app = root.join("app");
+        touch(&app.join("Cargo.toml"), 8);
+        touch(&app.join("target").join("debug").join("a.bin"), 512);
+        touch(&app.join("target").join("incremental").join("deep").join("b.bin"), 700);
+        // A nested project inside an artifact is never discovered, yet its
+        // bytes still belong to the parent artifact.
+        touch(&app.join("target").join("node_modules").join("dep").join("package.json"), 40);
+        touch(&app.join("target").join("node_modules").join("dep").join("index.js"), 1_024);
+
+        let report = dev_scan_with(
+            DevScanOptions { roots: vec![root.display().to_string()], include_global: false, max_depth: None, limit: None },
+            &base(&root),
+        )
+        .unwrap();
+
+        assert_eq!(report.artifacts.len(), 1, "only the anchored target may be a candidate: {:?}", report.artifacts);
+        assert_eq!(report.scanned_projects, 1, "nested projects must not be discovered");
+        let artifact = &report.artifacts[0];
+        assert_eq!(artifact.bytes, 512 + 700 + 40 + 1_024);
+        assert_eq!(dir_size(Path::new(&artifact.path), &mut Vec::new()).bytes, artifact.bytes);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn concurrent_clean_deletes_every_artifact_and_reports_order() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("concurrent-clean");
+
+        let mut paths = Vec::new();
+        let mut expected = 0u64;
+        for project in 0..8 {
+            let app = root.join(format!("app{project}"));
+            touch(&app.join("Cargo.toml"), 8);
+            for index in 0..5 {
+                touch(&app.join("target").join("debug").join(format!("f{index}.bin")), 256);
+            }
+            paths.push(app.join("target").display().to_string());
+            expected += 5 * 256;
+
+            // Two artifacts sharing one parent exercise the sibling stripe.
+            touch(&app.join("package.json"), 16);
+            touch(&app.join("node_modules").join("dep").join("index.js"), 512);
+            touch(&app.join("dist").join("bundle.js"), 128);
+            paths.push(app.join("node_modules").display().to_string());
+            paths.push(app.join("dist").display().to_string());
+            expected += 512 + 128;
+        }
+
+        let report =
+            dev_clean(DevCleanOptions { paths: paths.clone(), mode: DeleteMode::Permanent, confirm: true, concurrency: Some(4) }).unwrap();
+
+        assert_eq!(report.items.len(), paths.len());
+        assert!(report.items.iter().all(|item| item.status == CleanStatus::Deleted), "{:?}", report.items);
+        assert_eq!(report.freed_bytes, expected);
+        for (index, item) in report.items.iter().enumerate() {
+            assert_eq!(item.path, paths[index], "results stay in input order");
+            assert!(!Path::new(&item.path).exists(), "{} survived", item.path);
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_artifact_is_skipped_and_deleted_once_released() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("locked");
+        let app = root.join("app");
+        touch(&app.join("Cargo.toml"), 8);
+        touch(&app.join("target").join("debug").join("a.bin"), 256);
+        let target = app.join("target");
+
+        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(target.join("debug").join("a.bin")).unwrap();
+        let report = dev_clean(DevCleanOptions {
+            paths: vec![target.display().to_string()],
+            mode: DeleteMode::Permanent,
+            confirm: true,
+            concurrency: Some(2),
+        })
+        .unwrap();
+        assert_eq!(report.items[0].status, CleanStatus::Skipped);
+        assert_eq!(report.items[0].reason.as_deref(), Some("in-use-or-locked"));
+        assert!(target.exists(), "an occupied artifact must survive");
+        assert_eq!(report.freed_bytes, 0);
+        drop(lock);
+
+        let report = dev_clean(DevCleanOptions {
+            paths: vec![target.display().to_string()],
+            mode: DeleteMode::Permanent,
+            confirm: true,
+            concurrency: Some(2),
+        })
+        .unwrap();
+        assert_eq!(report.items[0].status, CleanStatus::Deleted);
+        assert!(!target.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn symlinked_artifact_is_never_reported_or_deleted() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("symlink");
+        let store = root.join("store");
+        touch(&store.join("data.bin"), 4_096);
+        let app = root.join("app");
+        touch(&app.join("Cargo.toml"), 8);
+        let target = app.join("target");
+        if std::os::windows::fs::symlink_dir(&store, &target).is_err() {
+            // A host without symlink privilege cannot exercise this gate.
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+
+        let report = dev_scan_with(
+            DevScanOptions { roots: vec![root.display().to_string()], include_global: false, max_depth: None, limit: None },
+            &base(&root),
+        )
+        .unwrap();
+        assert!(report.artifacts.is_empty(), "a linked artifact must not be reported: {:?}", report.artifacts);
+
+        let report = dev_clean(DevCleanOptions {
+            paths: vec![target.display().to_string()],
+            mode: DeleteMode::Permanent,
+            confirm: true,
+            concurrency: Some(2),
+        })
+        .unwrap();
+        assert_eq!(report.items[0].status, CleanStatus::Skipped);
+        assert_eq!(report.items[0].reason.as_deref(), Some("symlink-not-followed"));
+        assert!(target.exists(), "the link itself must survive");
+        assert!(store.join("data.bin").exists(), "the link target must survive");
+
+        fs::remove_dir(&target).unwrap();
+        let _ = fs::remove_dir_all(&root);
     }
 
     // Helpers that bypass environment-dependent base dirs.

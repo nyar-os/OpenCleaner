@@ -113,7 +113,7 @@ function byteRate(bytes: number, ms: number): string {
 function printProfile(label: string, profile: DevProfile | null | undefined, totals?: { bytes?: number; items?: number }): void {
     if (!profile) return;
     const stages = profile.stages.map((stage) => `${stage.name}=${stage.elapsedMs.toFixed(0)}ms`).join('  ');
-    const scanMs = profile.stages.filter((stage) => stage.name === 'discovery' || stage.name === 'measurement').reduce((sum, stage) => sum + stage.elapsedMs, 0);
+    const scanMs = profile.stages.find((stage) => stage.name === 'scan')?.elapsedMs ?? 0;
     const deleteMs = profile.stages.find((stage) => stage.name === 'delete')?.elapsedMs ?? 0;
     console.log(`profile[${label}]: ${stages}`);
     if (scanMs > 0) {
@@ -155,6 +155,7 @@ cli.command('dev', 'cli.cmd.dev')
     .option('--max-depth <n>', 'cli.opt.maxDepth')
     .option('--limit <n>', 'cli.opt.limit', limitOption)
     .option('--mode <mode>', 'cli.opt.mode', { enum: ['trash', 'permanent'] })
+    .option('--concurrency <n>', 'cli.opt.concurrency', limitOption)
     .option('--yes', 'cli.opt.yes')
     .actionCtx(async (options) => {
         applyActor(options);
@@ -201,7 +202,12 @@ cli.command('dev', 'cli.cmd.dev')
                 console.log('nothing selected.');
                 return 0;
             }
-            const report = devClean({ paths: selected.map((item) => item.artifact.path), mode: plan.mode, confirm: true });
+            const report = devClean({
+                paths: selected.map((item) => item.artifact.path),
+                mode: plan.mode,
+                confirm: true,
+                concurrency: numberOption(options, 'concurrency'),
+            });
             for (const item of report.items) {
                 console.log(`${item.status.padEnd(9)}  ${formatBytes(item.bytes).padStart(10)}  ${item.path}${item.reason ? `  (${item.reason})` : ''}`);
             }
