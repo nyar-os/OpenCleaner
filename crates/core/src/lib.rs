@@ -8,6 +8,7 @@
 //!   `unsupported_platform` / `not_implemented` / `dependency_blocked` code.
 //!   They never degrade silently into an empty result.
 
+pub mod anchors;
 pub mod dev;
 pub mod env;
 mod error;
@@ -16,7 +17,13 @@ pub mod platform;
 pub mod registry;
 pub mod scan;
 pub mod software;
+mod safety;
+pub mod temp;
 
+pub use anchors::{
+    BuildRootCleanItem, BuildRootCleanOptions, BuildRootCleanReport, BuildRootConfig, BuildRootDeclaration, BuildRootEntry, BuildRootOptions,
+    BuildRootPlan, build_root_clean, build_root_config, build_root_plan, default_build_root_config, parse_build_root_config,
+};
 pub use dev::{
     CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevPlan, DevPlanItem, DevProfile, DevScanOptions,
     DevScanReport, DevStageTiming, RiskLevel, SkipReason, dev_clean, dev_plan, dev_scan,
@@ -34,3 +41,7 @@ pub use registry::{
 };
 pub use scan::{ScanEntry, ScanOptions, ScanReport, default_scan_root, scan};
 pub use software::{SoftwareFinding, SoftwareKind, SoftwareOptions, SoftwareReport, SoftwareSkip, software_residue_scan};
+pub use temp::{
+    CwdProbeReport, TempCleanOptions, TempCleanReport, TempFailure, TempFile, TempGroup, TempOptions, TempPlan, TempSkips, temp_clean,
+    temp_plan,
+};

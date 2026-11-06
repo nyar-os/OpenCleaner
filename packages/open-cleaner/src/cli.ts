@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { createCli } from '@wae/commander';
 import {
     auditQuery,
+    buildRootClean,
+    buildRootPlan,
     capabilities,
     configureAudit,
     devClean,
@@ -22,6 +24,8 @@ import {
     runGui,
     scan,
     softwareResidueScan,
+    tempClean,
+    tempPlan,
     version,
 } from './index.js';
 import type { ActorKind, DeleteMode, DevProfile, PathScope } from './index.js';
@@ -349,6 +353,104 @@ cli.command('software', 'cli.cmd.software')
             for (const warning of report.warnings) console.log(`warning: ${warning}`);
             console.log('\nsoftware residue is reported only in this build. No directory is removed.');
             return 0;
+        } catch (err) {
+            return reportError(err);
+        }
+    });
+
+cli.command('temp', 'cli.cmd.temp')
+    .option('--root <path>', 'cli.opt.root')
+    .option('--older-than-days <n>', 'cli.opt.olderThanDays')
+    .option('--sample <n>', 'cli.opt.sample')
+    .option('--yes', 'cli.opt.yes')
+    .actionCtx(async (options) => {
+        applyActor(options);
+        const root = text(options, 'root');
+        const olderThanDays = numberOption(options, 'older-than-days');
+        try {
+            const plan = tempPlan({ root, olderThanDays, sampleLimit: numberOption(options, 'sample') ?? 50 });
+            console.log(`root: ${plan.root}`);
+            console.log(`threshold: older than ${plan.olderThanDays} day(s), cutoff ${new Date(plan.cutoffUnixMs).toISOString()}`);
+            console.log(`scanned: ${plan.scannedFiles} files / ${formatBytes(plan.scannedBytes)}`);
+            console.log(`candidates: ${plan.candidateFiles} files / ${formatBytes(plan.candidateBytes)}`);
+            console.log(
+                `skipped: recent=${plan.skipped.recent} in-use=${plan.skipped.inUse} symlink=${plan.skipped.symlink} protected=${plan.skipped.protected} cwd-shielded=${plan.skipped.cwdShielded} process-temp=${plan.skipped.processTemp} unreadable=${plan.skipped.unreadable}`,
+            );
+            console.log(
+                `cwd probe: supported=${plan.cwdProbe.supported} processes=${plan.cwdProbe.processes} resolved=${plan.cwdProbe.resolved} unresolved=${plan.cwdProbe.failed} process-temp-dirs=${plan.cwdProbe.tempDirs}`,
+            );
+            console.log('\nage distribution:');
+            for (const group of plan.ageGroups) {
+                console.log(`  ${group.label.padEnd(18)} ${String(group.files).padStart(7)} files  ${formatBytes(group.bytes).padStart(10)}`);
+            }
+            console.log('\nextension distribution:');
+            for (const group of plan.extensionGroups.slice(0, 15)) {
+                console.log(`  ${group.label.padEnd(18)} ${String(group.files).padStart(7)} files  ${formatBytes(group.bytes).padStart(10)}`);
+            }
+            const scope = plan.samplesTruncated ? `${plan.samples.length} of ${plan.candidateFiles}` : String(plan.samples.length);
+            console.log(`\nsamples (${scope}):`);
+            for (const file of plan.samples) {
+                console.log(`  ${formatBytes(file.bytes).padStart(10)}  ${String(file.ageDays).padStart(3)}d  ${file.path}`);
+            }
+            for (const warning of plan.warnings) console.log(`warning: ${warning}`);
+            if (!flag(options, 'yes')) {
+                console.log('\npreview only. Re-run with --yes to delete exactly the candidates above.');
+                return 0;
+            }
+            if (plan.candidateFiles === 0) {
+                console.log('nothing selected.');
+                return 0;
+            }
+            const report = tempClean({
+                root: plan.root,
+                olderThanDays: plan.olderThanDays,
+                cutoffUnixMs: plan.cutoffUnixMs,
+                confirm: true,
+            });
+            console.log(`\nevaluated: ${report.candidateFiles}  deleted: ${report.deletedFiles} files  freed: ${formatBytes(report.freedBytes)}`);
+            console.log(`skipped during execution: in-use=${report.skipped.inUse} recent=${report.skipped.recent} symlink=${report.skipped.symlink} protected=${report.skipped.protected} process-temp=${report.skipped.processTemp}`);
+            if (report.failures.length) {
+                console.log(`\nfailures (${report.failures.length}):`);
+                for (const failure of report.failures) console.log(`  ${failure.path}  (${failure.reason})`);
+            }
+            for (const warning of report.warnings) console.log(`warning: ${warning}`);
+            return report.failures.length ? 1 : 0;
+        } catch (err) {
+            return reportError(err);
+        }
+    });
+
+cli.command('build-roots', 'cli.cmd.buildRoots')
+    .option('--config <path>', 'cli.opt.config')
+    .option('--yes', 'cli.opt.yes')
+    .actionCtx(async (options) => {
+        applyActor(options);
+        try {
+            const plan = buildRootPlan({ config: text(options, 'config') });
+            console.log(`config: ${plan.configPath}  exists=${plan.configExists}`);
+            for (const entry of plan.entries) {
+                console.log(`\n${(entry.removable ? 'removable' : 'skip').padEnd(9)}  line ${entry.line}  ${formatBytes(entry.bytes).padStart(10)}  ${entry.path}`);
+                console.log(`  authorized by: ${entry.authorization}`);
+                if (entry.skipReason) console.log(`  reason: ${entry.skipReason}`);
+            }
+            console.log(`\ntotal: ${formatBytes(plan.totalBytes)}  removable: ${formatBytes(plan.removableBytes)}`);
+            for (const warning of plan.warnings) console.log(`warning: ${warning}`);
+            if (!flag(options, 'yes')) {
+                console.log('\npreview only. Re-run with --yes to delete the removable declarations.');
+                return 0;
+            }
+            const selected = plan.entries.filter((entry) => entry.removable);
+            if (!selected.length) {
+                console.log('nothing selected.');
+                return 0;
+            }
+            const report = buildRootClean({ config: plan.configPath, paths: selected.map((entry) => entry.path), confirm: true });
+            for (const item of report.items) {
+                console.log(`${item.status.padEnd(9)}  line ${item.line}  ${formatBytes(item.bytes).padStart(10)}  ${item.path}${item.reason ? `  (${item.reason})` : ''}`);
+            }
+            console.log(`deleted: ${report.deletedDirs} roots  freed: ${formatBytes(report.freedBytes)}`);
+            for (const warning of report.warnings) console.log(`warning: ${warning}`);
+            return report.items.some((item) => item.status !== 'deleted') ? 1 : 0;
         } catch (err) {
             return reportError(err);
         }

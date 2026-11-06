@@ -81,6 +81,58 @@ to an S plan, reject any candidate below an installation or application root:
 
 Report those as B and leave them alone. A directory name alone is never evidence.
 
+### Temp directory reclamation
+
+`open-cleaner temp` reclaims the temp root at file granularity. Nothing here removes a whole
+directory, because one temp root mixes hundreds of thousands of files owned by unrelated
+programs.
+
+- Only files older than the threshold are candidates. The default is 7 days and
+  `--older-than-days` changes it, so a file a program wrote today is never touched.
+- Every candidate gets its own occupancy probe before it is selected, and the same probe runs
+  again inside the executing pass. A file another process holds open is counted and skipped,
+  never deleted and never retried later in the batch.
+- Directories are still excluded as subtrees: a running process's working directory, a running
+  process's own `TEMP`/`TMP` value, a symbolic link or junction, and any protected component.
+- Each failure is printed with its path and reason. There is no aggregate "partial failure" row
+  to hide an individual file.
+- The plan prints the candidate count, the total bytes, and the distribution by age and by
+  extension before the first deletion.
+
+Temp files are A, not S. A stale temp file can be the only copy of a build artifact, an installer
+payload, or a diagnostic capture: reclaiming it may cost a rebuild or lose evidence, which is
+exactly the A test. Age, occupancy and exclusion are what make the rule safe, not a tier
+promotion.
+
+### Declared build roots
+
+A shared build directory such as a central cargo target has no project manifest, so no
+heuristic rule may claim it. `open-cleaner build-roots` accepts it only through an explicit
+declaration in a plain-text config, one absolute path per line, with `#` comments:
+
+```
+# shared build outputs
+C:\cargo-target
+C:\_build
+```
+
+- A directory name is never evidence. Only a listed absolute path is eligible, and the same
+  name elsewhere stays rejected.
+- The plan prints the config path and the line number that authorized each path. The audit
+  record carries the config path plus every `path`/`line` pair, so a later reviewer can find
+  the exact line that allowed the deletion.
+- Every declared root still passes the full gate set: absolute path, an existing directory, not
+  a drive root, no protected component, not a shared platform directory, outside installed
+  software, and not a symbolic link or junction.
+- A root is skipped when a process holds it open or when any file under it changed within the
+  last 10 minutes, so the tool never races a running build.
+- Duplicate declarations are reported with the first line instead of counted twice.
+- The default config is `open-cleaner/build-roots.conf` in the user data directory. A missing
+  config is reported as missing, not as an empty list of removable roots.
+
+This does not loosen the manifest requirement for `dev`: a config declaration is the only
+additional route, and it is explicit, logged, and revocable by editing one line.
+
 ## Safety
 
 - Preview first with `scan` or `dev` without `--yes`. Deletion is always a separate, confirmed

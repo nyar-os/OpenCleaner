@@ -294,6 +294,142 @@ export type SoftwareReport = {
     scannedAtUnixMs: number;
 };
 
+export type TempSkips = {
+    recent: number;
+    symlink: number;
+    protected: number;
+    inUse: number;
+    cwdShielded: number;
+    processTemp: number;
+    unreadable: number;
+};
+
+export type TempGroup = {
+    label: string;
+    files: number;
+    bytes: number;
+};
+
+export type TempFile = {
+    path: string;
+    bytes: number;
+    ageDays: number;
+};
+
+export type TempCwdProbe = {
+    supported: boolean;
+    processes: number;
+    resolved: number;
+    failed: number;
+    /** In-root process temp directories excluded from the walk. */
+    tempDirs: number;
+};
+
+export type TempOptions = {
+    root?: string;
+    olderThanDays?: number;
+    sampleLimit?: number;
+};
+
+export type TempCleanOptions = {
+    root?: string;
+    olderThanDays?: number;
+    /** Timestamp printed by the plan; candidates are derived from it. */
+    cutoffUnixMs: number;
+    confirm: true;
+};
+
+export type TempPlan = {
+    root: string;
+    olderThanDays: number;
+    cutoffUnixMs: number;
+    scannedFiles: number;
+    scannedBytes: number;
+    candidateFiles: number;
+    candidateBytes: number;
+    skipped: TempSkips;
+    ageGroups: TempGroup[];
+    extensionGroups: TempGroup[];
+    samples: TempFile[];
+    samplesTruncated: boolean;
+    cwdProbe: TempCwdProbe;
+    warnings: string[];
+    scannedAtUnixMs: number;
+};
+
+export type TempFailure = {
+    path: string;
+    reason: string;
+};
+
+export type TempCleanReport = {
+    root: string;
+    olderThanDays: number;
+    cutoffUnixMs: number;
+    executed: boolean;
+    candidateFiles: number;
+    deletedFiles: number;
+    freedBytes: number;
+    skipped: TempSkips;
+    failures: TempFailure[];
+    warnings: string[];
+    finishedAtUnixMs: number;
+};
+
+export type BuildRootOptions = {
+    config?: string;
+};
+
+export type BuildRootDeclaration = {
+    path: string;
+    line: number;
+};
+
+export type BuildRootEntry = {
+    path: string;
+    line: number;
+    bytes: number;
+    files: number;
+    removable: boolean;
+    skipReason?: string | null;
+    authorization: string;
+};
+
+export type BuildRootPlan = {
+    configPath: string;
+    configExists: boolean;
+    entries: BuildRootEntry[];
+    totalBytes: number;
+    removableBytes: number;
+    warnings: string[];
+    scannedAtUnixMs: number;
+};
+
+export type BuildRootCleanOptions = {
+    config?: string;
+    paths: string[];
+    confirm: true;
+};
+
+export type BuildRootCleanItem = {
+    path: string;
+    line: number;
+    bytes: number;
+    files: number;
+    status: string;
+    reason?: string | null;
+};
+
+export type BuildRootCleanReport = {
+    configPath: string;
+    executed: boolean;
+    items: BuildRootCleanItem[];
+    deletedDirs: number;
+    freedBytes: number;
+    warnings: string[];
+    finishedAtUnixMs: number;
+};
+
 export type Capabilities = {
     platform: string;
     arch: string;
@@ -379,6 +515,10 @@ type NativeBinding = {
     envPathScan(optionsJson?: string): EnvPathReport;
     envPathClean(optionsJson: string): EnvPathCleanReport;
     softwareResidueScan(optionsJson?: string): SoftwareReport;
+    tempPlan(optionsJson?: string): TempPlan;
+    tempClean(optionsJson: string): TempCleanReport;
+    buildRootPlan(optionsJson?: string): BuildRootPlan;
+    buildRootClean(optionsJson: string): BuildRootCleanReport;
     version(): string;
     openGui(options?: OpenGuiOptions): void;
     pumpEvents(): boolean;

@@ -13,9 +13,10 @@ mod audit;
 use std::{cell::RefCell, path::PathBuf};
 
 use open_cleaner_core::{
-    CapabilityState, DeleteMode, DevCleanOptions, DevScanOptions, EnvPathCleanOptions, EnvPathOptions, Error as CoreError, RegistryOptions,
-    RegistryResidueOptions, ScanOptions, SoftwareOptions, capabilities, dev_clean, dev_plan, dev_scan, env_path_clean, env_path_scan,
-    registry_residue_scan, registry_scan, scan, software_residue_scan,
+    BuildRootCleanOptions, BuildRootOptions, CapabilityState, DeleteMode, DevCleanOptions, DevScanOptions, EnvPathCleanOptions,
+    EnvPathOptions, Error as CoreError, RegistryOptions, RegistryResidueOptions, ScanOptions, SoftwareOptions, TempCleanOptions,
+    TempOptions, build_root_clean, build_root_config, build_root_plan, capabilities, dev_clean, dev_plan, dev_scan, env_path_clean,
+    env_path_scan, registry_residue_scan, registry_scan, scan, software_residue_scan, temp_clean, temp_plan,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -116,6 +117,26 @@ impl IpcHandler for ScanIpcHandler {
                 let options: SoftwareOptions = parse_options(value.get("options"))?;
                 let params = value.get("options").cloned().unwrap_or(Value::Null);
                 report_json(&audited_software_residue(options, params)?)
+            }),
+            "tempPlan" => ipc_reply(value.get("id"), "tempPlanResult", "tempPlanError", || {
+                let options: TempOptions = parse_options(value.get("options"))?;
+                let params = value.get("options").cloned().unwrap_or(Value::Null);
+                report_json(&audited_temp_plan(options, params)?)
+            }),
+            "tempClean" => ipc_reply(value.get("id"), "tempCleanResult", "tempCleanError", || {
+                let options: TempCleanOptions = require_options(value.get("options"), "tempClean")?;
+                let params = value.get("options").cloned().unwrap_or(Value::Null);
+                report_json(&audited_temp_clean(options, params)?)
+            }),
+            "buildRootPlan" => ipc_reply(value.get("id"), "buildRootPlanResult", "buildRootPlanError", || {
+                let options: BuildRootOptions = parse_options(value.get("options"))?;
+                let params = value.get("options").cloned().unwrap_or(Value::Null);
+                report_json(&audited_build_root_plan(options, params)?)
+            }),
+            "buildRootClean" => ipc_reply(value.get("id"), "buildRootCleanResult", "buildRootCleanError", || {
+                let options: BuildRootCleanOptions = require_options(value.get("options"), "buildRootClean")?;
+                let params = build_root_clean_params(&options)?;
+                report_json(&audited_build_root_clean(options, params)?)
             }),
             _ => IpcOutcome::Ignored,
         }
@@ -321,6 +342,38 @@ fn dev_clean_js(ctx: CallContext) -> Result<JsValue> {
     let options: DevCleanOptions = require_options(raw.as_ref(), "devClean")?;
     let params = raw.unwrap_or(Value::Null);
     report_value_to_js(ctx.env(), &audited_dev_clean(options, params)?)
+}
+
+#[function(js_name = "tempPlan")]
+fn temp_plan_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: TempOptions = parse_options(raw.as_ref())?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_temp_plan(options, params)?)
+}
+
+#[function(js_name = "tempClean")]
+fn temp_clean_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: TempCleanOptions = require_options(raw.as_ref(), "tempClean")?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_temp_clean(options, params)?)
+}
+
+#[function(js_name = "buildRootPlan")]
+fn build_root_plan_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: BuildRootOptions = parse_options(raw.as_ref())?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_build_root_plan(options, params)?)
+}
+
+#[function(js_name = "buildRootClean")]
+fn build_root_clean_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: BuildRootCleanOptions = require_options(raw.as_ref(), "buildRootClean")?;
+    let params = build_root_clean_params(&options)?;
+    report_value_to_js(ctx.env(), &audited_build_root_clean(options, params)?)
 }
 
 #[function(js_name = "registryResidueScan")]
@@ -746,6 +799,68 @@ fn audited_software_residue(options: SoftwareOptions, params: Value) -> Result<o
     .map_err(core_error)
 }
 
+fn audited_temp_plan(options: TempOptions, params: Value) -> Result<open_cleaner_core::TempPlan> {
+    audit::run("temp-plan", Mode::DryRun, params, || {
+        let plan = temp_plan(options)?;
+        let summary = format!(
+            "{} of {} files older than {} days, {} bytes",
+            plan.candidate_files, plan.scanned_files, plan.older_than_days, plan.candidate_bytes
+        );
+        let count = plan.candidate_files;
+        Ok((plan, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)
+}
+
+fn audited_temp_clean(options: TempCleanOptions, params: Value) -> Result<open_cleaner_core::TempCleanReport> {
+    audit::run("temp-clean", Mode::Execute, params, || {
+        let report = temp_clean(options)?;
+        let summary = format!(
+            "{} files deleted, {} bytes freed, {} failures, {} in use",
+            report.deleted_files,
+            report.freed_bytes,
+            report.failures.len(),
+            report.skipped.in_use
+        );
+        let count = report.deleted_files;
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)
+}
+
+fn audited_build_root_plan(options: BuildRootOptions, params: Value) -> Result<open_cleaner_core::BuildRootPlan> {
+    audit::run("build-root-plan", Mode::DryRun, params, || {
+        let plan = build_root_plan(options)?;
+        let removable = plan.entries.iter().filter(|entry| entry.removable).count() as u64;
+        let summary = format!("{removable} of {} declared roots removable, {} bytes", plan.entries.len(), plan.removable_bytes);
+        Ok((plan, audit::Summary::new(removable, summary)))
+    })
+    .map_err(core_error)
+}
+
+fn audited_build_root_clean(options: BuildRootCleanOptions, params: Value) -> Result<open_cleaner_core::BuildRootCleanReport> {
+    audit::run("build-root-clean", Mode::Execute, params, || {
+        let report = build_root_clean(options)?;
+        let summary = format!("{} declared roots deleted, {} bytes freed", report.deleted_dirs, report.freed_bytes);
+        let count = report.deleted_dirs;
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)
+}
+
+/// Audit parameters for a declared-root deletion: the config file plus the
+/// line that authorized every declaration it contains.
+fn build_root_clean_params(options: &BuildRootCleanOptions) -> Result<Value> {
+    let config = build_root_config(BuildRootOptions { config: options.config.clone() }).map_err(core_error)?;
+    let authorizations: Vec<Value> = config.declarations.iter().map(|item| json!({ "path": &item.path, "line": item.line })).collect();
+    Ok(json!({
+        "configPath": config.config_path,
+        "configExists": config.exists,
+        "requestedPaths": &options.paths,
+        "authorizations": authorizations,
+    }))
+}
+
 fn resolve_gui_dir() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("OPEN_CLEANER_GUI") {
         let path = PathBuf::from(p);
@@ -783,6 +898,10 @@ register_module![
     env_path_scan_js,
     env_path_clean_js,
     software_residue_scan_js,
+    temp_plan_js,
+    temp_clean_js,
+    build_root_plan_js,
+    build_root_clean_js,
     open_gui,
     pump_events,
     close_gui,

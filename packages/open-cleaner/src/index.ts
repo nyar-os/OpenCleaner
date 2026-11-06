@@ -24,6 +24,14 @@ import {
     type ScanReport,
     type SoftwareOptions,
     type SoftwareReport,
+    type BuildRootCleanOptions,
+    type BuildRootCleanReport,
+    type BuildRootOptions,
+    type BuildRootPlan,
+    type TempCleanOptions,
+    type TempCleanReport,
+    type TempOptions,
+    type TempPlan,
 } from './native.js';
 
 export type {
@@ -138,6 +146,48 @@ export function envPathClean(options: EnvPathCleanOptions): EnvPathCleanReport {
 export function softwareResidueScan(options: SoftwareOptions = {}): SoftwareReport {
     return loadNative().softwareResidueScan(JSON.stringify(options));
 }
+
+/**
+ * Read-only temp plan. Every candidate file is age-checked and occupancy
+ * probed individually, and the report groups them by age and extension.
+ */
+export function tempPlan(options: TempOptions = {}): TempPlan {
+    return loadNative().tempPlan(JSON.stringify(options));
+}
+
+/** Delete the files selected by a plan cutoff; every file is re-probed first. */
+export function tempClean(options: TempCleanOptions): TempCleanReport {
+    return loadNative().tempClean(JSON.stringify(options));
+}
+
+/** Read-only plan for build roots declared in the config file, one per line. */
+export function buildRootPlan(options: BuildRootOptions = {}): BuildRootPlan {
+    return loadNative().buildRootPlan(JSON.stringify(options));
+}
+
+/** Delete declared build roots; each path must still be declared at clean time. */
+export function buildRootClean(options: BuildRootCleanOptions): BuildRootCleanReport {
+    return loadNative().buildRootClean(JSON.stringify(options));
+}
+
+export type {
+    BuildRootCleanItem,
+    BuildRootCleanOptions,
+    BuildRootCleanReport,
+    BuildRootDeclaration,
+    BuildRootEntry,
+    BuildRootOptions,
+    BuildRootPlan,
+    TempCleanOptions,
+    TempCleanReport,
+    TempCwdProbe,
+    TempFailure,
+    TempFile,
+    TempGroup,
+    TempOptions,
+    TempPlan,
+    TempSkips,
+} from './native.js';
 
 export function version(): string {
     return loadNative().version();

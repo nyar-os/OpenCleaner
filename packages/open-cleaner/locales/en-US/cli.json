@@ -8,6 +8,8 @@
             "registry": "Inspect Windows registry residue: orphan uninstall rows, dead file associations, failing startup items",
             "env": "Inspect and edit the Windows PATH value (report-only by default)",
             "software": "Find leftover install and config directories from uninstalled products",
+            "temp": "Reclaim the temp directory file by file: only files older than 7 days by default, each occupancy-probed",
+            "buildRoots": "Clean only the build roots declared in the config file (dry-run by default)",
             "audit": "Print the append-only capability audit history as JSON lines",
             "gui": "Open the GUI window",
             "version": "Print the package version"
@@ -32,7 +34,10 @@
             "actorSource": "Actor entry point, for example cli, gui, plugin (default: cli)",
             "actorFilter": "Only show records for this actor id",
             "since": "Only show records at or after this Unix millisecond timestamp",
-            "capability": "Only show records for this capability name"
+            "capability": "Only show records for this capability name",
+            "olderThanDays": "Only process temp files older than this many days (default 7, max 365)",
+            "sample": "Sample files printed by the plan. 0 prints every candidate",
+            "config": "Build-root config file. Default: open-cleaner/build-roots.conf under the user data directory"
         }
     }
 }

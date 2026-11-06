@@ -8,6 +8,8 @@
             "registry": "检查 Windows 注册表残留：卸载残留项、失效文件关联、失效启动项",
             "env": "检查并编辑 Windows PATH（默认只报告）",
             "software": "查找已卸载产品遗留的安装目录与配置目录",
+            "temp": "按文件粒度回收临时目录：默认只处理 7 天以上的文件，逐文件做占用探针",
+            "buildRoots": "只清理配置文件中显式声明的构建根目录（默认 dry-run）",
             "audit": "以 JSON 行打印追加式能力审计历史",
             "gui": "打开 GUI 窗口",
             "version": "打印包版本"
@@ -32,7 +34,10 @@
             "actorSource": "actor 入口来源，例如 cli、gui、plugin（默认 cli）",
             "actorFilter": "只显示该 actor id 的记录",
             "since": "只显示该 Unix 毫秒时间戳及之后的记录",
-            "capability": "只显示该能力名的记录"
+            "capability": "只显示该能力名的记录",
+            "olderThanDays": "只处理早于该天数的临时文件（默认 7，最大 365）",
+            "sample": "计划中打印的样本文件数；0 表示打印全部",
+            "config": "构建根目录配置文件；默认位于用户数据目录 open-cleaner/build-roots.conf"
         }
     }
 }
