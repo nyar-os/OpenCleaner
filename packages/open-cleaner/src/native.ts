@@ -92,6 +92,21 @@ export type DevScanOptions = {
     limit?: number;
 };
 
+export type DevStageTiming = {
+    name: string;
+    elapsedMs: number;
+};
+
+/** Opt-in measurements, present only when `OPEN_CLEANER_PROFILE` is set. */
+export type DevProfile = {
+    stages: DevStageTiming[];
+    dirsVisited: number;
+    filesVisited: number;
+    bytesMeasured: number;
+    peakWorkingSetBytes?: number | null;
+    peakHandleCount?: number | null;
+};
+
 export type DevScanReport = {
     roots: string[];
     scannedProjects: number;
@@ -99,6 +114,7 @@ export type DevScanReport = {
     artifacts: DevArtifact[];
     warnings: string[];
     scannedAtUnixMs: number;
+    profile?: DevProfile | null;
 };
 
 export type DeleteMode = 'trash' | 'permanent';
@@ -128,6 +144,7 @@ export type DevPlan = {
     skippedBytes: number;
     warnings: string[];
     scannedAtUnixMs: number;
+    profile?: DevProfile | null;
 };
 
 export type DevCleanOptions = {
@@ -152,6 +169,7 @@ export type DevCleanReport = {
     items: DevCleanItem[];
     freedBytes: number;
     warnings: string[];
+    profile?: DevProfile | null;
 };
 
 export type PathScope = 'user' | 'machine';

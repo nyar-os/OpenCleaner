@@ -11,7 +11,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    time::SystemTime,
+    sync::OnceLock,
+    time::{Duration, Instant, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,61 @@ impl RiskLevel {
             Self::GlobalCache => 2,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevStageTiming {
+    pub name: String,
+    pub elapsed_ms: f64,
+}
+
+/// Opt-in cleanup measurements. Absent unless `OPEN_CLEANER_PROFILE` is set to
+/// a non-empty value other than `0`, so normal runs pay no measurement cost.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DevProfile {
+    pub stages: Vec<DevStageTiming>,
+    pub dirs_visited: u64,
+    pub files_visited: u64,
+    pub bytes_measured: u64,
+    pub peak_working_set_bytes: Option<u64>,
+    pub peak_handle_count: Option<u32>,
+}
+
+impl DevProfile {
+    fn add(&mut self, name: &str, elapsed: Duration) {
+        self.stages.push(DevStageTiming { name: name.to_string(), elapsed_ms: elapsed.as_secs_f64() * 1000.0 });
+    }
+
+    fn sample_peak(&mut self) {
+        let (working_set, handles) = platform::process_peak_usage();
+        if let Some(bytes) = working_set {
+            self.peak_working_set_bytes = Some(self.peak_working_set_bytes.unwrap_or(0).max(bytes));
+        }
+        if let Some(count) = handles {
+            self.peak_handle_count = Some(self.peak_handle_count.unwrap_or(0).max(count));
+        }
+    }
+}
+
+fn profiling_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("OPEN_CLEANER_PROFILE").is_ok_and(|value| !value.is_empty() && value != "0"))
+}
+
+#[derive(Debug, Clone, Default)]
+struct ScanProfile {
+    walk: Duration,
+    measure: Duration,
+    dirs: u64,
+    files: u64,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SizeStats {
+    bytes: u64,
+    dirs: u64,
+    files: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -79,6 +135,7 @@ pub struct DevScanReport {
     pub artifacts: Vec<DevArtifact>,
     pub warnings: Vec<String>,
     pub scanned_at_unix_ms: u64,
+    pub profile: Option<DevProfile>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +191,7 @@ pub struct DevPlan {
     pub skipped_bytes: u64,
     pub warnings: Vec<String>,
     pub scanned_at_unix_ms: u64,
+    pub profile: Option<DevProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +228,7 @@ pub struct DevCleanReport {
     pub items: Vec<DevCleanItem>,
     pub freed_bytes: u64,
     pub warnings: Vec<String>,
+    pub profile: Option<DevProfile>,
 }
 
 pub fn dev_scan(options: DevScanOptions) -> Result<DevScanReport> {
@@ -178,7 +237,7 @@ pub fn dev_scan(options: DevScanOptions) -> Result<DevScanReport> {
 
 pub fn dev_plan(options: DevScanOptions, mode: DeleteMode) -> Result<DevPlan> {
     let dirs = base_dirs();
-    let report = dev_scan_with(options, &dirs)?;
+    let mut report = dev_scan_with(options, &dirs)?;
     let mut warnings = report.warnings.clone();
     let mode_supported = match mode {
         DeleteMode::Permanent => true,
@@ -188,10 +247,21 @@ pub fn dev_plan(options: DevScanOptions, mode: DeleteMode) -> Result<DevPlan> {
         warnings.push(format!("recycle bin is unavailable on {}; this plan can only be executed with permanent deletion", platform::name()));
     }
 
+    let mut profile = report.profile.take();
+    let analysis_start = profile.as_ref().map(|_| Instant::now());
     let mut items = Vec::with_capacity(report.artifacts.len());
     for artifact in report.artifacts {
         let skip_reason = evaluate(&artifact, &dirs);
+        if let Some(profile) = profile.as_mut()
+            && items.len() % 256 == 0
+        {
+            profile.sample_peak();
+        }
         items.push(DevPlanItem { removable: skip_reason.is_none(), artifact, skip_reason });
+    }
+    if let (Some(profile), Some(start)) = (profile.as_mut(), analysis_start) {
+        profile.add("analysis", start.elapsed());
+        profile.sample_peak();
     }
 
     let total_bytes: u64 = items.iter().map(|item| item.artifact.bytes).sum();
@@ -216,6 +286,7 @@ pub fn dev_plan(options: DevScanOptions, mode: DeleteMode) -> Result<DevPlan> {
         skipped_bytes,
         warnings,
         scanned_at_unix_ms: report.scanned_at_unix_ms,
+        profile,
     })
 }
 
@@ -231,15 +302,24 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
     let mut items = Vec::with_capacity(options.paths.len());
     let mut warnings = Vec::new();
     let mut freed_bytes = 0u64;
+    let mut profile = profiling_enabled().then(DevProfile::default);
+    let mut validate = Duration::ZERO;
+    let mut delete = Duration::ZERO;
 
     for raw in options.paths {
         let path = PathBuf::from(&raw);
-        let Some(artifact) = artifact_for_clean(&path, &dirs)
+        let validate_start = profile.as_ref().map(|_| Instant::now());
+        let artifact = artifact_for_clean(&path, &dirs);
+        let skip = artifact.as_ref().and_then(|artifact| evaluate(artifact, &dirs));
+        if let Some(start) = validate_start {
+            validate += start.elapsed();
+        }
+        let Some(artifact) = artifact
         else {
             items.push(DevCleanItem { path: raw.clone(), bytes: 0, status: CleanStatus::Skipped, reason: Some("unverified-path".to_string()) });
             continue;
         };
-        if let Some(reason) = evaluate(&artifact, &dirs) {
+        if let Some(reason) = skip {
             items.push(DevCleanItem {
                 path: raw,
                 bytes: artifact.bytes,
@@ -249,10 +329,14 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
             continue;
         }
 
+        let delete_start = profile.as_ref().map(|_| Instant::now());
         let result = match options.mode {
             DeleteMode::Trash => trash::trash_path(&path).map(|()| CleanStatus::Trashed),
             DeleteMode::Permanent => trash::remove_permanently(&path).map(|()| CleanStatus::Deleted),
         };
+        if let Some(start) = delete_start {
+            delete += start.elapsed();
+        }
         match result {
             Ok(status) => {
                 if path.exists() {
@@ -272,9 +356,18 @@ pub fn dev_clean(options: DevCleanOptions) -> Result<DevCleanReport> {
                 items.push(DevCleanItem { path: raw, bytes: artifact.bytes, status: CleanStatus::Failed, reason: Some(err.to_string()) });
             }
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.sample_peak();
+        }
     }
 
-    Ok(DevCleanReport { mode: options.mode, executed: true, items, freed_bytes, warnings })
+    if let Some(profile) = profile.as_mut() {
+        profile.add("validate", validate);
+        profile.add("delete", delete);
+        profile.sample_peak();
+    }
+
+    Ok(DevCleanReport { mode: options.mode, executed: true, items, freed_bytes, warnings, profile })
 }
 
 fn dev_scan_with(options: DevScanOptions, dirs: &BaseDirs) -> Result<DevScanReport> {
@@ -288,6 +381,7 @@ fn dev_scan_with(options: DevScanOptions, dirs: &BaseDirs) -> Result<DevScanRepo
         warnings: Vec::new(),
         dirs,
         root_volume: roots.first().and_then(|root| platform::volume_of(root)),
+        profile: profiling_enabled().then(ScanProfile::default),
     };
 
     for root in &roots {
@@ -296,6 +390,15 @@ fn dev_scan_with(options: DevScanOptions, dirs: &BaseDirs) -> Result<DevScanRepo
     if options.include_global {
         collector.collect_global();
     }
+
+    let profile = collector.profile.map(|profile| {
+        let mut report =
+            DevProfile { dirs_visited: profile.dirs, files_visited: profile.files, bytes_measured: profile.bytes, ..DevProfile::default() };
+        report.add("discovery", profile.walk.saturating_sub(profile.measure));
+        report.add("measurement", profile.measure);
+        report.sample_peak();
+        report
+    });
 
     let mut artifacts: Vec<DevArtifact> = collector.artifacts.into_values().collect();
     artifacts.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
@@ -315,6 +418,7 @@ fn dev_scan_with(options: DevScanOptions, dirs: &BaseDirs) -> Result<DevScanRepo
         artifacts,
         warnings,
         scanned_at_unix_ms: epoch_millis(),
+        profile,
     })
 }
 
@@ -325,10 +429,12 @@ struct Collector<'a> {
     warnings: Vec<String>,
     dirs: &'a BaseDirs,
     root_volume: Option<String>,
+    profile: Option<ScanProfile>,
 }
 
 impl Collector<'_> {
     fn walk(&mut self, dir: &Path, depth: usize, max_depth: usize) {
+        let started = self.profile.as_ref().map(|_| Instant::now());
         let manifests = rules::detect_manifests(dir);
         if !manifests.is_empty() {
             self.scanned_projects += 1;
@@ -340,26 +446,30 @@ impl Collector<'_> {
             }
         }
 
-        if depth >= max_depth {
-            return;
+        if depth < max_depth
+            && let Ok(read) = fs::read_dir(dir)
+        {
+            for item in read.flatten() {
+                let Ok(meta) = fs::symlink_metadata(item.path())
+                else {
+                    continue;
+                };
+                if !meta.is_dir() || platform::is_link_like(&meta) {
+                    continue;
+                }
+                if rules::should_skip_descend(&item.file_name()) {
+                    continue;
+                }
+                self.walk(&item.path(), depth + 1, max_depth);
+            }
         }
-        let Ok(read) = fs::read_dir(dir)
-        else {
+        else if depth < max_depth {
             self.warnings.push(format!("cannot read {}; subtree skipped", dir.display()));
-            return;
-        };
-        for item in read.flatten() {
-            let Ok(meta) = fs::symlink_metadata(item.path())
-            else {
-                continue;
-            };
-            if !meta.is_dir() || platform::is_link_like(&meta) {
-                continue;
-            }
-            if rules::should_skip_descend(&item.file_name()) {
-                continue;
-            }
-            self.walk(&item.path(), depth + 1, max_depth);
+        }
+
+        if let (Some(profile), Some(start)) = (self.profile.as_mut(), started) {
+            profile.walk += start.elapsed();
+            profile.dirs += 1;
         }
     }
 
@@ -381,7 +491,15 @@ impl Collector<'_> {
         }
 
         let mut warnings = Vec::new();
-        let bytes = dir_size(&path, &mut warnings);
+        let measure_start = self.profile.as_ref().map(|_| Instant::now());
+        let stats = dir_size(&path, &mut warnings);
+        if let (Some(profile), Some(start)) = (self.profile.as_mut(), measure_start) {
+            profile.measure += start.elapsed();
+            profile.dirs += stats.dirs;
+            profile.files += stats.files;
+            profile.bytes += stats.bytes;
+        }
+        let bytes = stats.bytes;
         let volume = platform::volume_of(&path);
         let root_volume = platform::volume_of(root);
         let cross_volume = match (&volume, &root_volume) {
@@ -422,7 +540,15 @@ impl Collector<'_> {
                 continue;
             }
             let mut warnings = Vec::new();
-            let bytes = dir_size(&spec.path, &mut warnings);
+            let measure_start = self.profile.as_ref().map(|_| Instant::now());
+            let stats = dir_size(&spec.path, &mut warnings);
+            if let (Some(profile), Some(start)) = (self.profile.as_mut(), measure_start) {
+                profile.measure += start.elapsed();
+                profile.dirs += stats.dirs;
+                profile.files += stats.files;
+                profile.bytes += stats.bytes;
+            }
+            let bytes = stats.bytes;
             let volume = platform::volume_of(&spec.path);
             let cross_volume = match (&volume, &self.root_volume) {
                 (Some(a), Some(b)) => a != b,
@@ -559,7 +685,7 @@ fn artifact_for_clean(path: &Path, dirs: &BaseDirs) -> Option<DevArtifact> {
     }
     if let Some((rule, root)) = rules::resolve_project_artifact(path) {
         let mut warnings = Vec::new();
-        let bytes = dir_size(path, &mut warnings);
+        let bytes = dir_size(path, &mut warnings).bytes;
         let volume = platform::volume_of(path);
         let root_volume = platform::volume_of(&root);
         let cross_volume = match (&volume, &root_volume) {
@@ -584,7 +710,7 @@ fn artifact_for_clean(path: &Path, dirs: &BaseDirs) -> Option<DevArtifact> {
     let specs = global::specs(dirs);
     let spec = specs.iter().find(|spec| spec.path == path)?;
     let mut warnings = Vec::new();
-    let bytes = dir_size(path, &mut warnings);
+    let bytes = dir_size(path, &mut warnings).bytes;
     Some(DevArtifact {
         path: path.display().to_string(),
         bytes,
@@ -600,10 +726,11 @@ fn artifact_for_clean(path: &Path, dirs: &BaseDirs) -> Option<DevArtifact> {
     })
 }
 
-fn dir_size(path: &Path, warnings: &mut Vec<String>) -> u64 {
-    let mut total = 0u64;
+fn dir_size(path: &Path, warnings: &mut Vec<String>) -> SizeStats {
+    let mut stats = SizeStats::default();
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        stats.dirs += 1;
         let Ok(read) = fs::read_dir(&dir)
         else {
             if warnings.len() < 8 {
@@ -623,11 +750,12 @@ fn dir_size(path: &Path, warnings: &mut Vec<String>) -> u64 {
                 stack.push(item.path());
             }
             else if meta.is_file() {
-                total = total.saturating_add(meta.len());
+                stats.files += 1;
+                stats.bytes = stats.bytes.saturating_add(meta.len());
             }
         }
     }
-    total
+    stats
 }
 
 fn epoch_millis() -> u64 {
@@ -873,6 +1001,7 @@ mod tests {
             artifacts,
             warnings: Vec::new(),
             scanned_at_unix_ms: 0,
+            profile: None,
         }
     }
 
@@ -894,6 +1023,7 @@ mod tests {
             skipped_bytes: total_bytes - removable_bytes,
             warnings: Vec::new(),
             scanned_at_unix_ms: report.scanned_at_unix_ms,
+            profile: None,
         }
     }
 }

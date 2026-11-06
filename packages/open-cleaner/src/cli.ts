@@ -24,7 +24,7 @@ import {
     softwareResidueScan,
     version,
 } from './index.js';
-import type { ActorKind, DeleteMode, PathScope } from './index.js';
+import type { ActorKind, DeleteMode, DevProfile, PathScope } from './index.js';
 
 function formatBytes(n: number): string {
     if (n < 1024) return `${n} B`;
@@ -97,6 +97,31 @@ function reportError(err: unknown): number {
     return 1;
 }
 
+function basename(value: string): string {
+    return value.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '';
+}
+
+function rate(value: number, ms: number): string {
+    return ms <= 0 ? 'n/a' : (value / (ms / 1000)).toFixed(1);
+}
+
+/** Print side-channel timings captured during the run. No-op when profiling is off. */
+function printProfile(label: string, profile: DevProfile | null | undefined, totals?: { bytes?: number; items?: number }): void {
+    if (!profile) return;
+    const stages = profile.stages.map((stage) => `${stage.name}=${stage.elapsedMs.toFixed(0)}ms`).join('  ');
+    const scanMs = profile.stages.filter((stage) => stage.name === 'discovery' || stage.name === 'measurement').reduce((sum, stage) => sum + stage.elapsedMs, 0);
+    const deleteMs = profile.stages.find((stage) => stage.name === 'delete')?.elapsedMs ?? 0;
+    console.log(`profile[${label}]: ${stages}`);
+    if (scanMs > 0) {
+        console.log(`  scan: ${rate(profile.dirsVisited, scanMs)} dirs/s  ${rate(profile.filesVisited, scanMs)} files/s  ${formatBytes(profile.bytesMeasured)}/s`);
+    }
+    if (deleteMs > 0 && totals?.bytes !== undefined) {
+        console.log(`  delete: ${formatBytes(totals.bytes)}/s  ${rate(totals.items ?? 0, deleteMs)} dirs/s`);
+    }
+    if (profile.peakWorkingSetBytes) console.log(`  peak working set: ${formatBytes(profile.peakWorkingSetBytes)}`);
+    if (profile.peakHandleCount) console.log(`  peak handles: ${profile.peakHandleCount}`);
+}
+
 cli.command('scan', 'cli.cmd.scan')
     .option('--root <path>', 'cli.opt.root')
     .option('--limit <n>', 'cli.opt.limit', limitOption)
@@ -122,6 +147,7 @@ cli.command('capabilities', 'cli.cmd.capabilities').actionCtx(async (options) =>
 cli.command('dev', 'cli.cmd.dev')
     .option('--root <path>...', 'cli.opt.devRoot')
     .option('--include-global', 'cli.opt.includeGlobal')
+    .option('--only <name>...', 'cli.opt.only')
     .option('--max-depth <n>', 'cli.opt.maxDepth')
     .option('--limit <n>', 'cli.opt.limit', limitOption)
     .option('--mode <mode>', 'cli.opt.mode', { enum: ['trash', 'permanent'] })
@@ -130,6 +156,11 @@ cli.command('dev', 'cli.cmd.dev')
         applyActor(options);
         const roots = list(options, 'root');
         const includeGlobal = flag(options, 'include-global');
+        const only = list(options, 'only')
+            .flatMap((name) => name.split(','))
+            .map((name) => name.trim().toLowerCase())
+            .filter(Boolean);
+        const matchesOnly = (artifactPath: string): boolean => only.length === 0 || only.includes(basename(artifactPath).toLowerCase());
         const mode = deleteMode(text(options, 'mode'), capabilities().trash);
         try {
             const plan = devPlan({ roots, includeGlobal, maxDepth: numberOption(options, 'max-depth'), limit: numberOption(options, 'limit') }, mode);
@@ -139,16 +170,18 @@ cli.command('dev', 'cli.cmd.dev')
             for (const warning of plan.warnings) console.log(`warning: ${warning}`);
 
             for (const item of plan.items) {
-                const selected = item.removable && (item.artifact.level === 1 || includeGlobal);
-                const state = item.removable ? (selected ? 'SELECT' : 'level-2') : `skip:${item.skipReason}`;
+                const matches = matchesOnly(item.artifact.path);
+                const selected = item.removable && matches && (item.artifact.level === 1 || includeGlobal);
+                const state = item.removable ? (matches ? (selected ? 'SELECT' : 'level-2') : 'filtered') : `skip:${item.skipReason}`;
                 const owner = item.artifact.projectRoot ?? '-';
                 console.log(
                     `${formatBytes(item.artifact.bytes).padStart(10)}  L${item.artifact.level}  ${state.padEnd(18)}  ${item.artifact.ecosystem.padEnd(10)}  ${item.artifact.path}`,
                 );
                 console.log(`            rule: ${item.artifact.rule}  anchor: ${item.artifact.anchor}  project: ${owner}`);
             }
+            printProfile('plan', plan.profile);
 
-            const selected = plan.items.filter((item) => item.removable && (item.artifact.level === 1 || includeGlobal));
+            const selected = plan.items.filter((item) => item.removable && matchesOnly(item.artifact.path) && (item.artifact.level === 1 || includeGlobal));
             if (!includeGlobal && plan.items.some((item) => item.removable && item.artifact.level === 2)) {
                 console.log('level-2 global caches are not selected. Pass --include-global to include them: they can be rebuilt but must be downloaded again.');
             }
@@ -170,6 +203,8 @@ cli.command('dev', 'cli.cmd.dev')
             }
             console.log(`freed: ${formatBytes(report.freedBytes)}`);
             for (const warning of report.warnings) console.log(`warning: ${warning}`);
+            const deleted = report.items.filter((item) => item.status === 'deleted' || item.status === 'trashed').length;
+            printProfile('clean', report.profile, { bytes: report.freedBytes, items: deleted });
             return report.items.some((item) => item.status === 'failed') ? 1 : 0;
         } catch (err) {
             return reportError(err);

@@ -18,8 +18,8 @@ pub mod scan;
 pub mod software;
 
 pub use dev::{
-    CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevPlan, DevPlanItem, DevScanOptions, DevScanReport,
-    RiskLevel, SkipReason, dev_clean, dev_plan, dev_scan,
+    CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevPlan, DevPlanItem, DevProfile, DevScanOptions,
+    DevScanReport, DevStageTiming, RiskLevel, SkipReason, dev_clean, dev_plan, dev_scan,
 };
 pub use env::{
     EnvPathBackup, EnvPathCleanItem, EnvPathCleanOptions, EnvPathCleanReport, EnvPathCleanStatus, EnvPathEntry, EnvPathOptions, EnvPathReport,

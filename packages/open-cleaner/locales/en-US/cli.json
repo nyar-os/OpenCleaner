@@ -16,6 +16,7 @@
             "root": "Directory to scan (default: system temp)",
             "devRoot": "Project root searched for manifests (repeatable, default: current directory)",
             "includeGlobal": "Also include level-2 global caches, which can be rebuilt but must be re-downloaded",
+            "only": "Only select artifact directories with this name. Repeat the flag or use commas for several names, for example --only target,node_modules",
             "maxDepth": "Maximum directory depth when looking for project manifests",
             "mode": "Delete mode: trash keeps a recycle-bin copy, permanent cannot be undone",
             "yes": "Execute the selected changes instead of printing a preview",
