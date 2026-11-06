@@ -56,7 +56,7 @@ be reproduced from source that stays on disk, without downloading anything again
 
 `open-cleaner dev` selects S candidates. Run the dry-run plan first, then confirm:
 
-`open-cleaner dev --root <project-root> --only target,dist --mode permanent --yes --actor-id <id> --actor-kind agent`
+`open-cleaner dev --root <project-root> --only target --only dist --mode permanent --yes --actor-id <id> --actor-kind agent`
 
 The gates below must all hold, and a skipped item is reported with its reason rather than retried:
 
@@ -90,22 +90,34 @@ programs.
 - Only files older than the threshold are candidates. The default is 7 days and
   `--older-than-days` changes it, so a file a program wrote today is never touched.
 - Every candidate gets its own occupancy probe before it is selected, and the same probe runs
-  again inside the executing pass. The probe asks for delete access, so a file whose handles
-  block deletion is counted and skipped instead of failing later. This probe cannot see a
-  running program image: Windows grants delete access to it and then refuses the delete, which
-  is why the image directory is excluded as a subtree below.
-- Directories are still excluded as subtrees: a running process's working directory, a running
-  process's own `TEMP`/`TMP` value, the directory that hosts a running process image, a
-  symbolic link or junction, and any protected component.
+  again inside the executing pass. The probe opens the file with delete access and no sharing,
+  so a file whose handles block deletion is counted and skipped instead of failing later.
+- The delete-access probe alone is not enough for a running program image. Windows grants the
+  probe handle to an executing image and only refuses the actual delete, so a locked
+  executable can pass the probe and still fail with access denied. A standalone check against
+  running executables reproduced this: the probe reported "not in use", the delete failed.
+  The guardrail is therefore a directory rule, not a file rule: any in-root directory that
+  hosts the image of a running process is excluded as a subtree. The plan reports those
+  directories in the process-path probe (`programDirs`) and the skip counter
+  (`programShielded`), so a reviewer can see the exclusion instead of guessing why a large
+  directory disappeared from the candidate list.
+- The image rule is deliberately conservative. It excludes the whole image directory rather
+  than the single executable, because a build may also hold a partially written `.pdb`, `.obj`
+  or `.lib` next to the image and there is no reliable cross-process signal that says the
+  write finished. Narrowing it would need evidence per case, not a larger byte target.
+- Other directories are still excluded as subtrees: a running process's working directory, a
+  running process's own `TEMP`/`TMP` value, a symbolic link or junction, and any protected
+  component.
 - Each failure is printed with its path and reason. There is no aggregate "partial failure" row
   to hide an individual file.
 - The plan prints the candidate count, the total bytes, and the distribution by age and by
   extension before the first deletion.
 
-Temp files are A, not S. A stale temp file can be the only copy of a build artifact, an installer
-payload, or a diagnostic capture: reclaiming it may cost a rebuild or lose evidence, which is
-exactly the A test. Age, occupancy and exclusion are what make the rule safe, not a tier
-promotion.
+`%TEMP%` and any other temp root are A, not S. A stale temp file can be the only copy of a build
+artifact, an installer payload, or a diagnostic capture: reclaiming it may cost a rebuild or lose
+evidence, which is exactly the A test. Age, occupancy and exclusion are what make the rule safe,
+not a tier promotion. The 7-day default is a floor chosen by that test, so an argument to lower
+it has to name which of those losses can no longer happen, not how many bytes it would free.
 
 ### Declared build roots
 
@@ -115,8 +127,9 @@ declaration in a plain-text config, one absolute path per line, with `#` comment
 
 ```
 # shared build outputs
-C:\cargo-target
-C:\_build
+# one absolute path per line, no wildcards
+<absolute build root>
+<absolute build root>
 ```
 
 - A directory name is never evidence. Only a listed absolute path is eligible, and the same
@@ -133,8 +146,24 @@ C:\_build
 - The default config is `open-cleaner/build-roots.conf` in the user data directory. A missing
   config is reported as missing, not as an empty list of removable roots.
 
-This does not loosen the manifest requirement for `dev`: a config declaration is the only
-additional route, and it is explicit, logged, and revocable by editing one line.
+Read the declaration as an authorization channel, not as a relaxation. The line decides whether
+the path is eligible at all, and the gate set above still decides whether it is safe at run time.
+Nothing about a declaration makes a directory name sufficient, and it does not loosen the
+manifest requirement for `dev`: the config is the only additional route, and it is explicit,
+logged, and revocable by editing one line.
+
+### Reviewing a plan in the GUI
+
+`open-cleaner gui` shows the same facts before anything is removed:
+
+- the toolbar names the active root, rule set and age threshold
+- the plan reports the candidate count, total bytes, the age and extension distributions,
+  skip counts with their reasons, and the largest candidates
+- deletion is a separate action, and the result lists every file outcome with its reason:
+  deleted, skipped, or failed
+
+There is deliberately no single "clean everything" button. A reviewer, human or agent, has to be
+able to state what the rule set selected and what each execution item did.
 
 ## Safety
 
