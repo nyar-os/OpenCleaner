@@ -90,8 +90,9 @@ programs.
 - Only files older than the threshold are candidates. The default is 7 days and
   `--older-than-days` changes it, so a file a program wrote today is never touched.
 - Every candidate gets its own occupancy probe before it is selected, and the same probe runs
-  again inside the executing pass. A file another process holds open is counted and skipped,
-  never deleted and never retried later in the batch.
+  again inside the executing pass. The probe asks for delete access, which is the only test that
+  predicts whether removal will actually succeed: a file another process holds open is counted
+  and skipped, never deleted and never retried later in the batch.
 - Directories are still excluded as subtrees: a running process's working directory, a running
   process's own `TEMP`/`TMP` value, a symbolic link or junction, and any protected component.
 - Each failure is printed with its path and reason. There is no aggregate "partial failure" row

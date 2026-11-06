@@ -169,13 +169,61 @@ pub(crate) fn probe_dir_in_use(path: &Path) -> bool {
     std::fs::rename(&probe, path).is_err()
 }
 
-/// Per-file occupancy probe. A file opened with no sharing allowed fails as
-/// soon as any other handle exists, which is the conservative answer.
+/// Per-file occupancy probe. It asks for `DELETE` access, so a file that a
+/// program holds open without delete sharing is reported as in use instead of
+/// failing later inside the delete batch.
 #[cfg(windows)]
 pub(crate) fn probe_file_in_use(path: &Path) -> bool {
-    use std::os::windows::fs::OpenOptionsExt;
+    let wide = file_sys::wide(path);
+    // SAFETY: `wide` is NUL-terminated and the handle is closed below.
+    let handle = unsafe {
+        file_sys::CreateFileW(
+            wide.as_ptr(),
+            file_sys::DELETE_ACCESS,
+            0,
+            std::ptr::null(),
+            file_sys::OPEN_EXISTING,
+            file_sys::FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle.is_null() || handle as isize == file_sys::INVALID_HANDLE_VALUE {
+        return true;
+    }
+    // SAFETY: `handle` was just opened and is not used afterwards.
+    unsafe { file_sys::CloseHandle(handle) };
+    false
+}
 
-    std::fs::OpenOptions::new().read(true).share_mode(0).open(path).is_err()
+#[cfg(windows)]
+mod file_sys {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+
+    pub const DELETE_ACCESS: u32 = 0x0001_0000;
+    pub const OPEN_EXISTING: u32 = 3;
+    pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    pub const INVALID_HANDLE_VALUE: isize = -1;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            security: *const c_void,
+            creation: u32,
+            flags: u32,
+            template: *mut c_void,
+        ) -> *mut c_void;
+        pub fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    pub fn wide(path: &std::path::Path) -> Vec<u16> {
+        let mut units: Vec<u16> = path.as_os_str().encode_wide().collect();
+        units.push(0);
+        units
+    }
 }
 
 #[cfg(not(windows))]
