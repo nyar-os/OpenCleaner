@@ -1,12 +1,30 @@
 #!/usr/bin/env node
 /**
  * Open Cleaner CLI — command tree via `@wae/commander`.
+ *
+ * Destructive commands are dry-run by default. `--yes` is required before any
+ * filesystem or registry mutation, and PATH edits always print the rollback
+ * artifacts.
  */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCli } from '@wae/commander';
-import { auditQuery, capabilities, configureAudit, registryScan, runGui, scan, version } from './index.js';
-import type { ActorKind } from './index.js';
+import {
+    auditQuery,
+    capabilities,
+    configureAudit,
+    devClean,
+    devPlan,
+    envPathClean,
+    envPathScan,
+    registryResidueScan,
+    registryScan,
+    runGui,
+    scan,
+    softwareResidueScan,
+    version,
+} from './index.js';
+import type { ActorKind, DeleteMode, PathScope } from './index.js';
 
 function formatBytes(n: number): string {
     if (n < 1024) return `${n} B`;
@@ -32,6 +50,23 @@ function text(options: Options, key: string): string | undefined {
     return typeof value === 'string' ? value : undefined;
 }
 
+function list(options: Options, key: string): string[] {
+    const value = options[key];
+    if (Array.isArray(value)) return value;
+    return typeof value === 'string' ? [value] : [];
+}
+
+function flag(options: Options, key: string): boolean {
+    return options[key] === true || options[key] === 'true';
+}
+
+function numberOption(options: Options, key: string): number | undefined {
+    const raw = text(options, key);
+    if (!raw) return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
+
 /** Attribute every capability call in this run to an explicit actor. */
 function applyActor(options: Options): void {
     const kindRaw = text(options, 'actor-kind');
@@ -52,14 +87,23 @@ const limitOption = {
     },
 };
 
+function deleteMode(raw: string | undefined, trashAvailable: boolean): DeleteMode {
+    if (raw === 'permanent' || raw === 'trash') return raw;
+    return trashAvailable ? 'trash' : 'permanent';
+}
+
+function reportError(err: unknown): number {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 1;
+}
+
 cli.command('scan', 'cli.cmd.scan')
     .option('--root <path>', 'cli.opt.root')
     .option('--limit <n>', 'cli.opt.limit', limitOption)
     .actionCtx(async (options) => {
         applyActor(options);
         const root = text(options, 'root');
-        const limitRaw = text(options, 'limit');
-        const limit = limitRaw ? Number(limitRaw) : undefined;
+        const limit = numberOption(options, 'limit');
         const report = scan({ root, limit });
         console.log(`root: ${report.root}`);
         console.log(`total: ${formatBytes(report.totalBytes)}`);
@@ -75,22 +119,193 @@ cli.command('capabilities', 'cli.cmd.capabilities').actionCtx(async (options) =>
     return 0;
 });
 
+cli.command('dev', 'cli.cmd.dev')
+    .option('--root <path>...', 'cli.opt.devRoot')
+    .option('--include-global', 'cli.opt.includeGlobal')
+    .option('--max-depth <n>', 'cli.opt.maxDepth')
+    .option('--limit <n>', 'cli.opt.limit', limitOption)
+    .option('--mode <mode>', 'cli.opt.mode', { enum: ['trash', 'permanent'] })
+    .option('--yes', 'cli.opt.yes')
+    .actionCtx(async (options) => {
+        applyActor(options);
+        const roots = list(options, 'root');
+        const includeGlobal = flag(options, 'include-global');
+        const mode = deleteMode(text(options, 'mode'), capabilities().trash);
+        try {
+            const plan = devPlan({ roots, includeGlobal, maxDepth: numberOption(options, 'max-depth'), limit: numberOption(options, 'limit') }, mode);
+            console.log(`roots: ${plan.roots.join(', ')}`);
+            console.log(`mode: ${plan.mode}${plan.modeSupported ? '' : ' (unsupported on this platform)'}`);
+            console.log(`total: ${formatBytes(plan.totalBytes)}  removable: ${formatBytes(plan.removableBytes)}  skipped: ${formatBytes(plan.skippedBytes)}`);
+            for (const warning of plan.warnings) console.log(`warning: ${warning}`);
+
+            for (const item of plan.items) {
+                const selected = item.removable && (item.artifact.level === 1 || includeGlobal);
+                const state = item.removable ? (selected ? 'SELECT' : 'level-2') : `skip:${item.skipReason}`;
+                const owner = item.artifact.projectRoot ?? '-';
+                console.log(
+                    `${formatBytes(item.artifact.bytes).padStart(10)}  L${item.artifact.level}  ${state.padEnd(18)}  ${item.artifact.ecosystem.padEnd(10)}  ${item.artifact.path}`,
+                );
+                console.log(`            rule: ${item.artifact.rule}  anchor: ${item.artifact.anchor}  project: ${owner}`);
+            }
+
+            const selected = plan.items.filter((item) => item.removable && (item.artifact.level === 1 || includeGlobal));
+            if (!includeGlobal && plan.items.some((item) => item.removable && item.artifact.level === 2)) {
+                console.log('level-2 global caches are not selected. Pass --include-global to include them: they can be rebuilt but must be downloaded again.');
+            }
+            if (!flag(options, 'yes')) {
+                console.log('dry run only. Re-run with --yes to delete the selected paths.');
+                return 0;
+            }
+            if (!plan.modeSupported) {
+                console.error(`delete mode ${plan.mode} is not available on this platform. Use --mode permanent or omit --mode.`);
+                return 1;
+            }
+            if (!selected.length) {
+                console.log('nothing selected.');
+                return 0;
+            }
+            const report = devClean({ paths: selected.map((item) => item.artifact.path), mode: plan.mode, confirm: true });
+            for (const item of report.items) {
+                console.log(`${item.status.padEnd(9)}  ${formatBytes(item.bytes).padStart(10)}  ${item.path}${item.reason ? `  (${item.reason})` : ''}`);
+            }
+            console.log(`freed: ${formatBytes(report.freedBytes)}`);
+            for (const warning of report.warnings) console.log(`warning: ${warning}`);
+            return report.items.some((item) => item.status === 'failed') ? 1 : 0;
+        } catch (err) {
+            return reportError(err);
+        }
+    });
+
 cli.command('registry', 'cli.cmd.registry')
+    .option('--limit <n>', 'cli.opt.limit', limitOption)
+    .option('--legacy', 'cli.opt.legacy')
+    .actionCtx(async (options) => {
+        applyActor(options);
+        const limit = numberOption(options, 'limit');
+        try {
+            if (flag(options, 'legacy')) {
+                const report = registryScan({ limit });
+                console.log(`platform: ${report.platform}`);
+                console.log(`scanned keys: ${report.scannedKeys}`);
+                for (const entry of report.entries) {
+                    console.log(`${entry.reason}  ${entry.displayName ?? entry.key}  ${entry.installLocation ?? ''}`);
+                }
+                return 0;
+            }
+            const report = registryResidueScan({ limit });
+            console.log(`platform: ${report.platform}  source: ${report.source}`);
+            console.log(`scanned keys: ${report.scannedKeys}  findings: ${report.findings.length}`);
+            for (const finding of report.findings) {
+                console.log(`${finding.kind}  ${finding.keyPath}${finding.valueName ? `\\${finding.valueName}` : ''}`);
+                console.log(`  target: ${finding.target}`);
+                console.log(`  evidence: ${finding.evidence}`);
+                console.log(`  safety: ${finding.safety}`);
+            }
+            for (const warning of report.warnings) console.log(`warning: ${warning}`);
+            return 0;
+        } catch (err) {
+            return reportError(err);
+        }
+    });
+
+cli.command('env', 'cli.cmd.env')
+    .option('--scope <scope>', 'cli.opt.scope', { enum: ['user', 'machine'], default: 'user' })
+    .option('--index <n>...', 'cli.opt.index')
+    .option('--backup-dir <dir>', 'cli.opt.backupDir')
+    .option('--limit <n>', 'cli.opt.limit', limitOption)
+    .option('--yes', 'cli.opt.yes')
+    .actionCtx(async (options) => {
+        applyActor(options);
+        const scopeRaw = text(options, 'scope');
+        const scope: PathScope = scopeRaw === 'machine' ? 'machine' : 'user';
+        const indexes = list(options, 'index').map((value) => Number(value));
+        try {
+            const report = envPathScan({ limit: numberOption(options, 'limit') });
+            console.log(`platform: ${report.platform}`);
+            if (report.backupDir) console.log(`backup dir: ${report.backupDir}`);
+            for (const warning of report.warnings) console.log(`warning: ${warning}`);
+            for (const scopeReport of report.scopes) {
+                console.log(`\n[${scopeReport.scope}] ${scopeReport.keyPath}  present=${scopeReport.present}  issues=${scopeReport.issues}`);
+                for (const entry of scopeReport.entries) {
+                    const issue = entry.issue ?? 'ok';
+                    const marker = entry.removable ? 'removable' : 'report-only';
+                    console.log(`  #${entry.index}  ${issue.padEnd(10)}  ${marker.padEnd(11)}  ${entry.raw}`);
+                    if (entry.issue) console.log(`      ${entry.evidence}`);
+                }
+            }
+
+            if (!indexes.length) {
+                console.log('\nPATH edits are never pre-selected. Review the entries above, then pass --scope, --index and --yes.');
+                return 0;
+            }
+            if (indexes.some((n) => !Number.isInteger(n) || n < 0)) {
+                console.error(`invalid --index: ${indexes.join(', ')}`);
+                return 1;
+            }
+
+            const selectedScope = report.scopes.find((item) => item.scope === scope);
+            if (!selectedScope) {
+                console.error(`scope ${scope} not found in the scan`);
+                return 1;
+            }
+            const picks = selectedScope.entries.filter((entry) => indexes.includes(entry.index));
+            if (!picks.length) {
+                console.error(`no entries matched indexes ${indexes.join(', ')} in scope ${scope}`);
+                return 1;
+            }
+            console.log(`\nselected ${picks.length} entr${picks.length === 1 ? 'y' : 'ies'}:`);
+            for (const entry of picks) {
+                console.log(`  #${entry.index}  ${entry.issue ?? 'ok'}  ${entry.raw}`);
+            }
+            if (!flag(options, 'yes')) {
+                console.log('preview only. Re-run with --yes to write the new PATH value. A JSON backup and a .reg restore script will be written first.');
+                return 0;
+            }
+            const cleanReport = envPathClean({
+                scope,
+                selections: picks.map((entry) => ({ index: entry.index, raw: entry.raw })),
+                confirm: true,
+                backupDir: text(options, 'backup-dir'),
+            });
+            for (const item of cleanReport.items) {
+                console.log(`${item.status.padEnd(9)}  #${item.index}  ${item.raw}${item.reason ? `  (${item.reason})` : ''}`);
+            }
+            console.log(`removed: ${cleanReport.removed}`);
+            if (cleanReport.backup) {
+                console.log(`backup json: ${cleanReport.backup.jsonPath}`);
+                console.log(`restore reg: ${cleanReport.backup.regPath}`);
+            }
+            for (const warning of cleanReport.warnings) console.log(`warning: ${warning}`);
+            return cleanReport.items.some((item) => item.status === 'failed') ? 1 : 0;
+        } catch (err) {
+            return reportError(err);
+        }
+    });
+
+cli.command('software', 'cli.cmd.software')
     .option('--limit <n>', 'cli.opt.limit', limitOption)
     .actionCtx(async (options) => {
         applyActor(options);
-        const limitRaw = text(options, 'limit');
         try {
-            const report = registryScan({ limit: limitRaw ? Number(limitRaw) : undefined });
-            console.log(`platform: ${report.platform}`);
-            console.log(`scanned keys: ${report.scannedKeys}`);
-            for (const entry of report.entries) {
-                console.log(`${entry.reason}  ${entry.displayName ?? entry.key}  ${entry.installLocation ?? ''}`);
+            const report = softwareResidueScan({ limit: numberOption(options, 'limit') });
+            console.log(`platform: ${report.platform}  source: ${report.source}`);
+            console.log(`uninstall keys: ${report.uninstallKeys}  candidates: ${report.findings.length}`);
+            for (const finding of report.findings) {
+                console.log(`\n${finding.kind}  ${formatBytes(finding.bytes)}  ${finding.path}`);
+                console.log(`  product: ${finding.displayName}`);
+                console.log(`  key: ${finding.registryKey}`);
+                console.log(`  rule: ${finding.rule}`);
+                console.log(`  evidence: ${finding.evidence}`);
+                console.log(`  safety: ${finding.safety}`);
             }
+            for (const skip of report.skipped) {
+                console.log(`skip: ${skip.reason}  ${skip.displayName ?? skip.registryKey}`);
+            }
+            for (const warning of report.warnings) console.log(`warning: ${warning}`);
+            console.log('\nsoftware residue is reported only in this build. No directory is removed.');
             return 0;
         } catch (err) {
-            console.error(err instanceof Error ? err.message : String(err));
-            return 1;
+            return reportError(err);
         }
     });
 
@@ -106,12 +321,11 @@ cli.command('audit', 'cli.cmd.audit')
         if (since !== undefined && (!Number.isFinite(since) || since < 0)) {
             throw new Error(`invalid --since: ${sinceRaw}`);
         }
-        const limitRaw = text(options, 'limit');
         const entries = auditQuery({
             actorId: text(options, 'actor'),
             fromMs: since,
             capability: text(options, 'capability'),
-            limit: limitRaw ? Number(limitRaw) : undefined,
+            limit: numberOption(options, 'limit'),
         });
         for (const entry of entries) {
             console.log(JSON.stringify(entry));

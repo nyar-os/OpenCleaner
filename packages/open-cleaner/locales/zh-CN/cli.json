@@ -1,16 +1,28 @@
 {
     "cli": {
-        "intro": "Open Cleaner — 扫描磁盘占用、检查注册表残留，并可选打开 GUI。",
+        "intro": "Open Cleaner — 扫描磁盘占用、清理开发产物、检查注册表残留与 PATH 异常，并可选打开 GUI。",
         "cmd": {
             "scan": "扫描目录并打印体积条目",
             "capabilities": "以 JSON 打印当前平台能力",
-            "registry": "检查 Windows 卸载项中失效的安装路径",
+            "dev": "查找并清理可重建的开发产物（默认 dry-run）",
+            "registry": "检查 Windows 注册表残留：卸载残留项、失效文件关联、失效启动项",
+            "env": "检查并编辑 Windows PATH（默认只报告）",
+            "software": "查找已卸载产品遗留的安装目录与配置目录",
             "audit": "以 JSON 行打印追加式能力审计历史",
             "gui": "打开 GUI 窗口",
             "version": "打印包版本"
         },
         "opt": {
             "root": "要扫描的目录（默认系统临时目录）",
+            "devRoot": "查找项目清单的工程根（可重复，默认当前目录）",
+            "includeGlobal": "同时包含二级全局缓存：可重建，但需要重新下载",
+            "maxDepth": "查找项目清单时的最大目录深度",
+            "mode": "删除方式：trash 保留回收站副本，permanent 不可恢复",
+            "yes": "执行已选改动，而不是只打印预览",
+            "scope": "PATH 作用域：user 或 machine",
+            "index": "dry-run 报告中的 PATH 条目序号（可重复）",
+            "backupDir": "PATH 备份 JSON 与 .reg 还原脚本的目录",
+            "legacy": "改用旧的失效安装路径检查，而不是残留分析",
             "limit": "最多打印的条目数",
             "title": "GUI 窗口标题",
             "actorId": "记录到每次能力调用的 actor id（默认读取 WAE_ACTOR_ID）",

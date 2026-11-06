@@ -40,12 +40,253 @@ export type RegistryReport = {
     entries: RegistryEntry[];
 };
 
+export type RegistryResidueKind = 'uninstall-residue' | 'file-association' | 'startup-item';
+
+/** One registry residue hit, always anchored on a concrete key path. */
+export type RegistryFinding = {
+    kind: RegistryResidueKind;
+    keyPath: string;
+    valueName?: string | null;
+    displayName?: string | null;
+    target: string;
+    evidence: string;
+    safety: string;
+};
+
+export type RegistryResidueOptions = {
+    limit?: number;
+};
+
+export type RegistryResidueReport = {
+    platform: string;
+    source: string;
+    scannedKeys: number;
+    findings: RegistryFinding[];
+    warnings: string[];
+    scannedAtUnixMs: number;
+};
+
+export type DevRiskLevel = 'project-local' | 'global-cache';
+
+/** A developer artifact candidate; every hit carries its rule and anchor. */
+export type DevArtifact = {
+    path: string;
+    bytes: number;
+    level: 1 | 2;
+    risk: DevRiskLevel;
+    ecosystem: string;
+    rule: string;
+    anchor: string;
+    projectRoot?: string | null;
+    volume?: string | null;
+    crossVolume: boolean;
+    warnings: string[];
+};
+
+export type DevScanOptions = {
+    /** Directories searched for projects. Empty = current working directory. */
+    roots?: string[];
+    /** Include level-2 global caches. Level 2 is never selected by default. */
+    includeGlobal?: boolean;
+    maxDepth?: number;
+    limit?: number;
+};
+
+export type DevScanReport = {
+    roots: string[];
+    scannedProjects: number;
+    anchors: string[];
+    artifacts: DevArtifact[];
+    warnings: string[];
+    scannedAtUnixMs: number;
+};
+
+export type DeleteMode = 'trash' | 'permanent';
+
+export type DevSkipReason =
+    | 'symlink-not-followed'
+    | 'protected-path'
+    | 'manifest-missing'
+    | 'rule-mismatch'
+    | 'not-found'
+    | 'not-a-directory'
+    | 'in-use-or-locked';
+
+export type DevPlanItem = {
+    artifact: DevArtifact;
+    removable: boolean;
+    skipReason?: DevSkipReason | null;
+};
+
+export type DevPlan = {
+    roots: string[];
+    mode: DeleteMode;
+    modeSupported: boolean;
+    items: DevPlanItem[];
+    totalBytes: number;
+    removableBytes: number;
+    skippedBytes: number;
+    warnings: string[];
+    scannedAtUnixMs: number;
+};
+
+export type DevCleanOptions = {
+    /** Paths taken from a dry-run plan; each is re-validated before deletion. */
+    paths: string[];
+    mode?: DeleteMode;
+    confirm: boolean;
+};
+
+export type DevCleanStatus = 'deleted' | 'trashed' | 'skipped' | 'failed';
+
+export type DevCleanItem = {
+    path: string;
+    bytes: number;
+    status: DevCleanStatus;
+    reason?: string | null;
+};
+
+export type DevCleanReport = {
+    mode: DeleteMode;
+    executed: boolean;
+    items: DevCleanItem[];
+    freedBytes: number;
+    warnings: string[];
+};
+
+export type PathScope = 'user' | 'machine';
+
+export type PathIssue = 'empty' | 'unresolved' | 'duplicate' | 'missing' | 'shadowed';
+
+export type EnvPathEntry = {
+    scope: PathScope;
+    keyPath: string;
+    index: number;
+    raw: string;
+    expanded?: string | null;
+    issue?: PathIssue | null;
+    evidence: string;
+    safety: string;
+    removable: boolean;
+    /** PATH is high risk: this is always false in the current build. */
+    defaultSelected: boolean;
+    relatedIndex?: number | null;
+};
+
+export type EnvPathScopeReport = {
+    scope: PathScope;
+    keyPath: string;
+    present: boolean;
+    entries: EnvPathEntry[];
+    issues: number;
+    removable: number;
+};
+
+export type EnvPathOptions = {
+    limit?: number;
+};
+
+export type EnvPathReport = {
+    platform: string;
+    scopes: EnvPathScopeReport[];
+    /** Directory that will hold the next rollback pair, when available. */
+    backupDir?: string | null;
+    warnings: string[];
+    scannedAtUnixMs: number;
+};
+
+export type EnvPathSelection = {
+    index: number;
+    /** Raw value from the dry-run report; must still match when cleaning. */
+    raw: string;
+};
+
+export type EnvPathCleanOptions = {
+    scope: PathScope;
+    selections: EnvPathSelection[];
+    confirm: boolean;
+    backupDir?: string;
+};
+
+export type EnvPathCleanStatus = 'removed' | 'skipped' | 'failed';
+
+export type EnvPathCleanItem = {
+    index: number;
+    raw: string;
+    status: EnvPathCleanStatus;
+    reason?: string | null;
+};
+
+export type EnvPathBackup = {
+    jsonPath: string;
+    regPath: string;
+    original: string;
+    restoreRegText: string;
+};
+
+export type EnvPathCleanReport = {
+    scope: PathScope;
+    keyPath: string;
+    executed: boolean;
+    items: EnvPathCleanItem[];
+    removed: number;
+    original?: string | null;
+    newValue?: string | null;
+    backup?: EnvPathBackup | null;
+    warnings: string[];
+};
+
+export type SoftwareKind = 'install-directory' | 'config-directory';
+
+export type SoftwareFinding = {
+    id: string;
+    kind: SoftwareKind;
+    path: string;
+    bytes: number;
+    displayName: string;
+    /** Uninstall key that anchors this candidate. */
+    registryKey: string;
+    installLocation?: string | null;
+    rule: string;
+    evidence: string;
+    safety: string;
+    removable: boolean;
+};
+
+export type SoftwareSkip = {
+    registryKey: string;
+    displayName?: string | null;
+    /** `still-installed`, `system-component`, `update-package`, `no-display-name` or `user-data`. */
+    reason: string;
+};
+
+export type SoftwareOptions = {
+    limit?: number;
+};
+
+export type SoftwareReport = {
+    platform: string;
+    source: string;
+    uninstallKeys: number;
+    findings: SoftwareFinding[];
+    skipped: SoftwareSkip[];
+    warnings: string[];
+    scannedAtUnixMs: number;
+};
+
 export type Capabilities = {
     platform: string;
     arch: string;
     fileScan: boolean;
+    devScan: boolean;
+    devClean: boolean;
+    /** Whether deletion routes through the OS recycle bin. */
+    trash: boolean;
     registryScan: boolean;
     registryClean: boolean;
+    envPathScan: boolean;
+    envPathClean: boolean;
+    softwareScan: boolean;
     gui: boolean;
     notes: string[];
 };
@@ -110,6 +351,14 @@ type NativeBinding = {
     scan(options?: ScanOptions): ScanReport;
     capabilities(): Capabilities;
     registryScan(options?: RegistryOptions): RegistryReport;
+    /** JSON-encoded options; see `devScan` in the facade for the typed API. */
+    devScan(optionsJson?: string): DevScanReport;
+    devPlan(optionsJson?: string, mode?: DeleteMode): DevPlan;
+    devClean(optionsJson: string): DevCleanReport;
+    registryResidueScan(optionsJson?: string): RegistryResidueReport;
+    envPathScan(optionsJson?: string): EnvPathReport;
+    envPathClean(optionsJson: string): EnvPathCleanReport;
+    softwareResidueScan(optionsJson?: string): SoftwareReport;
     version(): string;
     openGui(options?: OpenGuiOptions): void;
     pumpEvents(): boolean;

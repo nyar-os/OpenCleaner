@@ -1,16 +1,28 @@
 {
     "cli": {
-        "intro": "Open Cleaner — scan disk usage, inspect registry residue, and open the GUI.",
+        "intro": "Open Cleaner — scan disk usage, clean developer artifacts, inspect registry residue and PATH issues, and open the GUI.",
         "cmd": {
             "scan": "Scan a directory tree and print size entries",
             "capabilities": "Print platform capabilities as JSON",
-            "registry": "Inspect Windows uninstall entries for broken install locations",
+            "dev": "Find and clean rebuildable developer artifacts (dry-run by default)",
+            "registry": "Inspect Windows registry residue: orphan uninstall rows, dead file associations, failing startup items",
+            "env": "Inspect and edit the Windows PATH value (report-only by default)",
+            "software": "Find leftover install and config directories from uninstalled products",
             "audit": "Print the append-only capability audit history as JSON lines",
             "gui": "Open the GUI window",
             "version": "Print the package version"
         },
         "opt": {
             "root": "Directory to scan (default: system temp)",
+            "devRoot": "Project root searched for manifests (repeatable, default: current directory)",
+            "includeGlobal": "Also include level-2 global caches, which can be rebuilt but must be re-downloaded",
+            "maxDepth": "Maximum directory depth when looking for project manifests",
+            "mode": "Delete mode: trash keeps a recycle-bin copy, permanent cannot be undone",
+            "yes": "Execute the selected changes instead of printing a preview",
+            "scope": "PATH scope: user or machine",
+            "index": "PATH entry index from the dry-run report (repeatable)",
+            "backupDir": "Directory for the PATH backup JSON and .reg restore script",
+            "legacy": "Use the previous broken-install-location scan instead of residue analysis",
             "limit": "Max entries to print",
             "title": "GUI window title",
             "actorId": "Actor id recorded for every capability call (default: WAE_ACTOR_ID)",

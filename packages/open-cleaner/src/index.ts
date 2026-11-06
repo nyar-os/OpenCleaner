@@ -5,11 +5,25 @@ import {
     type AuditQueryOptions,
     type AuditRecord,
     type Capabilities,
+    type DeleteMode,
+    type DevCleanOptions,
+    type DevCleanReport,
+    type DevPlan,
+    type DevScanOptions,
+    type DevScanReport,
+    type EnvPathCleanOptions,
+    type EnvPathCleanReport,
+    type EnvPathOptions,
+    type EnvPathReport,
     type OpenGuiOptions,
     type RegistryOptions,
     type RegistryReport,
+    type RegistryResidueOptions,
+    type RegistryResidueReport,
     type ScanOptions,
     type ScanReport,
+    type SoftwareOptions,
+    type SoftwareReport,
 } from './native.js';
 
 export type {
@@ -19,13 +33,46 @@ export type {
     AuditQueryOptions,
     AuditRecord,
     Capabilities,
+    DeleteMode,
+    DevArtifact,
+    DevCleanItem,
+    DevCleanOptions,
+    DevCleanReport,
+    DevCleanStatus,
+    DevPlan,
+    DevPlanItem,
+    DevRiskLevel,
+    DevScanOptions,
+    DevScanReport,
+    DevSkipReason,
+    EnvPathBackup,
+    EnvPathCleanItem,
+    EnvPathCleanOptions,
+    EnvPathCleanReport,
+    EnvPathCleanStatus,
+    EnvPathEntry,
+    EnvPathOptions,
+    EnvPathReport,
+    EnvPathScopeReport,
+    EnvPathSelection,
     OpenGuiOptions,
+    PathIssue,
+    PathScope,
     RegistryEntry,
+    RegistryFinding,
     RegistryOptions,
     RegistryReport,
+    RegistryResidueKind,
+    RegistryResidueOptions,
+    RegistryResidueReport,
     ScanEntry,
     ScanOptions,
     ScanReport,
+    SoftwareFinding,
+    SoftwareKind,
+    SoftwareOptions,
+    SoftwareReport,
+    SoftwareSkip,
 } from './native.js';
 export { supportedPlatforms } from './native.js';
 
@@ -44,6 +91,50 @@ export function capabilities(): Capabilities {
  */
 export function registryScan(options: RegistryOptions = {}): RegistryReport {
     return loadNative().registryScan(options);
+}
+
+/** Dry-run scan for developer artifacts (manifest-anchored, never name-only). */
+export function devScan(options: DevScanOptions = {}): DevScanReport {
+    return loadNative().devScan(JSON.stringify(options));
+}
+
+/**
+ * Inspectable plan for developer artifacts. `trash` keeps a recycle-bin copy
+ * where the platform supports it.
+ */
+export function devPlan(options: DevScanOptions = {}, mode: DeleteMode = 'trash'): DevPlan {
+    return loadNative().devPlan(JSON.stringify(options), mode);
+}
+
+/** Delete explicitly listed paths; each is re-validated against the filesystem. */
+export function devClean(options: DevCleanOptions): DevCleanReport {
+    return loadNative().devClean(JSON.stringify(options));
+}
+
+/**
+ * Inspect Windows registry residue: orphan uninstall rows, dead file
+ * associations, and failing startup entries.
+ */
+export function registryResidueScan(options: RegistryResidueOptions = {}): RegistryResidueReport {
+    return loadNative().registryResidueScan(JSON.stringify(options));
+}
+
+/** Read-only PATH inspection. Nothing is selected by default. */
+export function envPathScan(options: EnvPathOptions = {}): EnvPathReport {
+    return loadNative().envPathScan(JSON.stringify(options));
+}
+
+/**
+ * Remove explicitly selected PATH entries. Requires `confirm: true` and
+ * writes a JSON backup plus a `.reg` restore script before touching the key.
+ */
+export function envPathClean(options: EnvPathCleanOptions): EnvPathCleanReport {
+    return loadNative().envPathClean(JSON.stringify(options));
+}
+
+/** Inspect leftover install and config directories anchored on uninstall keys. */
+export function softwareResidueScan(options: SoftwareOptions = {}): SoftwareReport {
+    return loadNative().softwareResidueScan(JSON.stringify(options));
 }
 
 export function version(): string {
