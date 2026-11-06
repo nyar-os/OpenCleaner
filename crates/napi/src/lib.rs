@@ -849,16 +849,26 @@ fn audited_build_root_clean(options: BuildRootCleanOptions, params: Value) -> Re
 }
 
 /// Audit parameters for a declared-root deletion: the config file plus the
-/// line that authorized every declaration it contains.
+/// line that authorized every declaration it contains. The key is
+/// `declarations` rather than anything credential-shaped, so the auditor keeps
+/// the evidence instead of redacting it.
 fn build_root_clean_params(options: &BuildRootCleanOptions) -> Result<Value> {
     let config = build_root_config(BuildRootOptions { config: options.config.clone() }).map_err(core_error)?;
-    let authorizations: Vec<Value> = config.declarations.iter().map(|item| json!({ "path": &item.path, "line": item.line })).collect();
+    let declarations: Vec<Value> = config
+        .declarations
+        .iter()
+        .map(|item| json!({ "path": &item.path, "line": item.line, "evidence": authorization_text(&config.config_path, item.line) }))
+        .collect();
     Ok(json!({
         "configPath": config.config_path,
         "configExists": config.exists,
         "requestedPaths": &options.paths,
-        "authorizations": authorizations,
+        "declarations": declarations,
     }))
+}
+
+fn authorization_text(config_path: &str, line: u64) -> String {
+    format!("line {line} of {config_path}")
 }
 
 fn resolve_gui_dir() -> Result<PathBuf> {
