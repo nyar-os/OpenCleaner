@@ -159,14 +159,18 @@ for (const dir of skillDirs) {
         const command = tokens[1];
         if (!commands.has(command)) fail(`${dir}: unknown command \`${command}\` in \`${invocation}\``);
         const allowed = flagsFor(command);
-        for (const token of tokens.slice(2)) {
+        for (let index = 2; index < tokens.length; index += 1) {
+            const token = tokens[index];
             if (token.startsWith('<')) continue;
-            if (token.startsWith('--')) {
-                const flag = token.split('=')[0];
-                if (!allowed.has(flag)) fail(`${dir}: flag \`${flag}\` is not defined for \`${command}\``);
-            }
-            else {
+            if (!token.startsWith('--')) {
                 fail(`${dir}: unexpected positional token \`${token}\` in \`${invocation}\``);
+            }
+            const flag = token.split('=')[0];
+            if (!allowed.has(flag)) fail(`${dir}: flag \`${flag}\` is not defined for \`${command}\``);
+            // A flag that is written without `=` consumes the value tokens that follow it,
+            // so `--only target` and `--root <path>` are both argument values, not positionals.
+            if (!token.includes('=')) {
+                while (index + 1 < tokens.length && !tokens[index + 1].startsWith('--') && !tokens[index + 1].startsWith('<')) index += 1;
             }
         }
         checkedInvocations += 1;
