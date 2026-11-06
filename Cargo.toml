@@ -21,7 +21,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 # Facade from doki-land/wae-framework (pinned rev for CI).
-wae = { git = "https://github.com/doki-land/wae-framework.git", rev = "33dbeeb033fe8d8ffa69e587311677033766eb70" }
+wae = { git = "https://github.com/doki-land/wae-framework.git", rev = "b5d555cc9f492858c602b62c3bd46a6be69012d4" }
 open-cleaner-core = { path = "crates/core", version = "0.0.0" }
 
 [profile.release]
