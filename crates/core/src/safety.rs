@@ -5,25 +5,22 @@
 //! followed, installation roots are never entered, and a candidate is skipped
 //! when a process holds it or when it sits inside a process working directory.
 
-use std::fs::Metadata;
-use std::path::{Component, Path, PathBuf};
+use std::{
+    fs::Metadata,
+    path::{Component, Path, PathBuf},
+};
 
-use crate::locations::{BaseDirs, base_dirs};
-use crate::{Error, Result, platform};
+use crate::{
+    Error, Result,
+    locations::{BaseDirs, base_dirs},
+    platform,
+};
 
 /// Components that mark a path as installation or system state. Name-only
 /// matching is intentional: every one of these is a fixed Windows well-known
 /// directory, not a guess about a project layout.
-const PROTECTED_COMPONENTS: &[&str] = &[
-    "windows",
-    "program files",
-    "program files (x86)",
-    "programdata",
-    "system volume information",
-    "$recycle.bin",
-    "$mft",
-    "$extend",
-];
+const PROTECTED_COMPONENTS: &[&str] =
+    &["windows", "program files", "program files (x86)", "programdata", "system volume information", "$recycle.bin", "$mft", "$extend"];
 
 /// Days used when a caller does not choose a threshold.
 pub(crate) const DEFAULT_AGE_DAYS: u64 = 7;
@@ -33,10 +30,7 @@ pub(crate) const DEFAULT_AGE_DAYS: u64 = 7;
 pub(crate) const RECENT_WRITE_MS: u64 = 10 * 60 * 1000;
 
 pub(crate) fn now_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_millis() as u64).unwrap_or(0)
 }
 
 /// Case-insensitive key used for containment and deduplication.
@@ -197,8 +191,7 @@ pub(crate) fn probe_file_in_use(path: &Path) -> bool {
 
 #[cfg(windows)]
 mod file_sys {
-    use std::ffi::c_void;
-    use std::os::windows::ffi::OsStrExt;
+    use std::{ffi::c_void, os::windows::ffi::OsStrExt};
 
     pub const DELETE_ACCESS: u32 = 0x0001_0000;
     pub const OPEN_EXISTING: u32 = 3;
@@ -271,7 +264,8 @@ pub(crate) fn collect_usage(root: &Path) -> Usage {
             }
             usage.files += 1;
             usage.bytes = usage.bytes.saturating_add(meta.len());
-            let modified = meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|elapsed| elapsed.as_millis() as u64);
+            let modified =
+                meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|elapsed| elapsed.as_millis() as u64);
             if let Some(stamp) = modified {
                 usage.newest_unix_ms = Some(usage.newest_unix_ms.map_or(stamp, |current| current.max(stamp)));
             }
@@ -293,6 +287,8 @@ pub(crate) struct ProcessPaths {
     pub dirs: Vec<PathBuf>,
     /// Values of `TEMP` / `TMP` from each process environment block.
     pub temp_dirs: Vec<PathBuf>,
+    /// Parent directories of the executable image of each running process.
+    pub image_dirs: Vec<PathBuf>,
 }
 
 #[cfg(windows)]
@@ -349,6 +345,7 @@ pub(crate) fn process_paths() -> ProcessPaths {
     const PROCESS_BASIC_INFORMATION_CLASS: u32 = 0;
     const PEB_PROCESS_PARAMETERS: usize = 0x20;
     const PARAMS_CURRENT_DIRECTORY: usize = 0x38;
+    const PARAMS_IMAGE_PATH: usize = 0x60;
     const PARAMS_ENVIRONMENT: usize = 0x80;
     /// Environment blocks are read in 4 KiB chunks and capped at 32 KiB, which
     /// is far above the size any real process uses.
@@ -381,9 +378,7 @@ pub(crate) fn process_paths() -> ProcessPaths {
         let mut read = 0usize;
         let size = std::mem::size_of::<usize>();
         // SAFETY: reads one pointer-sized value into a local buffer.
-        let ok = unsafe {
-            sys::ReadProcessMemory(handle, address as *const c_void, &mut value as *mut usize as *mut c_void, size, &mut read)
-        };
+        let ok = unsafe { sys::ReadProcessMemory(handle, address as *const c_void, &mut value as *mut usize as *mut c_void, size, &mut read) };
         (ok != 0 && read == size).then_some(value)
     }
 
@@ -415,9 +410,8 @@ pub(crate) fn process_paths() -> ProcessPaths {
         let mut returned = 0u32;
         let size = std::mem::size_of::<sys::ProcessBasicInformation>() as u32;
         // SAFETY: the out buffer matches `size` and is initialised on success.
-        let status = unsafe {
-            sys::NtQueryInformationProcess(handle, PROCESS_BASIC_INFORMATION_CLASS, info.as_mut_ptr().cast(), size, &mut returned)
-        };
+        let status =
+            unsafe { sys::NtQueryInformationProcess(handle, PROCESS_BASIC_INFORMATION_CLASS, info.as_mut_ptr().cast(), size, &mut returned) };
         if status != 0 {
             return None;
         }
@@ -465,9 +459,8 @@ pub(crate) fn process_paths() -> ProcessPaths {
             let mut read = 0usize;
             let size = take * std::mem::size_of::<u16>();
             // SAFETY: the buffer matches `size` and belongs to this thread.
-            let ok = unsafe {
-                sys::ReadProcessMemory(handle, (block + offset * 2) as *const c_void, buffer.as_mut_ptr().cast(), size, &mut read)
-            };
+            let ok =
+                unsafe { sys::ReadProcessMemory(handle, (block + offset * 2) as *const c_void, buffer.as_mut_ptr().cast(), size, &mut read) };
             let got = read / 2;
             if got == 0 && ok == 0 {
                 break;
@@ -503,6 +496,14 @@ pub(crate) fn process_paths() -> ProcessPaths {
     unsafe fn cwd_of(handle: *mut c_void) -> Option<PathBuf> {
         let parameters = unsafe { process_parameters(handle)? };
         unsafe { unicode_path(handle, parameters + PARAMS_CURRENT_DIRECTORY) }
+    }
+
+    /// # Safety
+    /// `handle` must be a live process handle with query and read rights.
+    unsafe fn image_dir_of(handle: *mut c_void) -> Option<PathBuf> {
+        let parameters = unsafe { process_parameters(handle)? };
+        let image = unsafe { unicode_path(handle, parameters + PARAMS_IMAGE_PATH) }?;
+        image.parent().map(Path::to_path_buf)
     }
 
     /// Resolves `TEMP` and `TMP` for one process. Values are expanded against
@@ -612,6 +613,11 @@ pub(crate) fn process_paths() -> ProcessPaths {
                     result.temp_dirs.push(dir);
                 }
             }
+            if let Some(dir) = unsafe { image_dir_of(process.0) } {
+                if !result.image_dirs.iter().any(|known| path_key(known) == path_key(&dir)) {
+                    result.image_dirs.push(dir);
+                }
+            }
         }
         // SAFETY: same snapshot and entry buffer as the first call.
         has_entry = unsafe { sys::Process32NextW(snapshot.0, &mut entry) } != 0;
@@ -626,6 +632,11 @@ pub(crate) fn process_paths() -> ProcessPaths {
     let temp = std::env::temp_dir();
     if !result.temp_dirs.iter().any(|known| path_key(known) == path_key(&temp)) {
         result.temp_dirs.push(temp);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            result.image_dirs.push(dir.to_path_buf());
+        }
     }
     result
 }

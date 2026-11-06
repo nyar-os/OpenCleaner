@@ -10,9 +10,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::dev::rules;
-use crate::safety::{self, DEFAULT_AGE_DAYS, ProcessPaths};
-use crate::{Error, Result, platform};
+use crate::{
+    Error, Result,
+    dev::rules,
+    platform,
+    safety::{self, DEFAULT_AGE_DAYS, ProcessPaths},
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TempOptions {
@@ -43,6 +46,8 @@ pub struct TempSkips {
     pub cwd_shielded: u64,
     /// Directories under a running process's own `TEMP`/`TMP` value.
     pub process_temp: u64,
+    /// Directories hosting the executable image of a running process.
+    pub program_shielded: u64,
     pub unreadable: u64,
 }
 
@@ -87,6 +92,9 @@ pub struct CwdProbeReport {
     pub failed: u32,
     /// Distinct in-root process temp directories that were excluded.
     pub temp_dirs: u32,
+    /// Distinct in-root directories hosting a running process image that were
+    /// excluded.
+    pub program_dirs: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -120,6 +128,8 @@ struct ScanOutput {
     /// Process `TEMP`/`TMP` directories inside the root, excluding the root
     /// itself. Anything below these is never entered.
     temp_dirs: Vec<PathBuf>,
+    /// Directories that host a running process image and live inside the root.
+    program_dirs: Vec<PathBuf>,
 }
 
 struct Candidate {
@@ -148,8 +158,8 @@ fn is_cwd_shielded(dir: &Path, paths: &ProcessPaths) -> bool {
     paths.dirs.iter().any(|cwd| safety::is_within(cwd, dir))
 }
 
-fn is_process_temp_shielded(dir: &Path, temp_dirs: &[PathBuf]) -> bool {
-    temp_dirs.iter().any(|temp| safety::is_within(temp, dir))
+fn is_in_shielded_dir(dir: &Path, shielded: &[PathBuf]) -> bool {
+    shielded.iter().any(|entry| safety::is_within(entry, dir))
 }
 
 fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOutput> {
@@ -160,6 +170,12 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
         .filter(|temp| safety::is_within(root, temp) && safety::path_key(temp) != safety::path_key(root))
         .cloned()
         .collect();
+    let program_dirs: Vec<PathBuf> = paths
+        .image_dirs
+        .iter()
+        .filter(|dir| safety::is_within(root, dir) && safety::path_key(dir) != safety::path_key(root))
+        .cloned()
+        .collect();
     let mut output = ScanOutput {
         candidates: Vec::new(),
         scanned_files: 0,
@@ -168,10 +184,12 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
         warnings: Vec::new(),
         paths,
         temp_dirs,
+        program_dirs,
     };
     if !output.paths.supported {
         output.warnings.push("process working directories could not be enumerated on this platform".to_string());
-    } else if output.paths.failed > 0 {
+    }
+    else if output.paths.failed > 0 {
         output.warnings.push(format!(
             "{} of {} processes could not be read, their working and temp directories are unknown",
             output.paths.failed, output.paths.processes
@@ -220,8 +238,12 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
                     output.skipped.cwd_shielded += 1;
                     continue;
                 }
-                if is_process_temp_shielded(&path, &output.temp_dirs) {
+                if is_in_shielded_dir(&path, &output.temp_dirs) {
                     output.skipped.process_temp += 1;
+                    continue;
+                }
+                if is_in_shielded_dir(&path, &output.program_dirs) {
+                    output.skipped.program_shielded += 1;
                     continue;
                 }
                 stack.push(path);
@@ -266,7 +288,10 @@ fn age_bucket(days: u64) -> &'static str {
 }
 
 fn extension_key(path: &Path) -> String {
-    path.extension().map(|value| value.to_string_lossy().to_ascii_lowercase()).filter(|value| !value.is_empty()).unwrap_or_else(|| "(none)".to_string())
+    path.extension()
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "(none)".to_string())
 }
 
 fn group_by<F: Fn(&Candidate) -> String>(candidates: &[Candidate], key: F) -> Vec<TempGroup> {
@@ -336,6 +361,7 @@ pub fn temp_plan(options: TempOptions) -> Result<TempPlan> {
             resolved: scanned.paths.resolved,
             failed: scanned.paths.failed,
             temp_dirs: scanned.temp_dirs.len() as u32,
+            program_dirs: scanned.program_dirs.len() as u32,
         },
         warnings: scanned.warnings,
         scanned_at_unix_ms: safety::now_unix_ms(),
@@ -444,7 +470,8 @@ mod tests {
         write_file(&root.join("old.bin"), 4096, 20);
         write_file(&root.join("older.log"), 2048, 40);
         write_file(&root.join("fresh.tmp"), 1024, 0);
-        let report = temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        let report =
+            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
         assert_eq!(report.candidate_files, 2);
         assert_eq!(report.candidate_bytes, 6144);
         assert_eq!(report.skipped.recent, 1);
@@ -460,7 +487,8 @@ mod tests {
         let fresh = root.join("fresh.tmp");
         write_file(&old, 1024, 20);
         write_file(&fresh, 1024, 0);
-        let plan = temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        let plan =
+            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
         let report = temp_clean(TempCleanOptions {
             root: Some(root.display().to_string()),
             older_than_days: Some(7),
