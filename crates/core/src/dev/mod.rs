@@ -1265,6 +1265,32 @@ mod tests {
     }
 
     #[test]
+    fn real_projects_outside_install_roots_keep_their_artifacts() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("real-project");
+
+        touch(&root.join("work").join("web").join("package.json"), 16);
+        touch(&root.join("work").join("web").join("node_modules").join("dep").join("index.js"), 1024);
+        touch(&root.join("work").join("web").join("dist").join("bundle.js"), 512);
+        touch(&root.join("work").join("rust").join("Cargo.toml"), 16);
+        touch(&root.join("work").join("rust").join("target").join("debug").join("app.bin"), 2048);
+
+        let report = dev_scan_with(
+            DevScanOptions { roots: vec![root.join("work").display().to_string()], include_global: false, max_depth: None, limit: None },
+            &base(&root),
+        )
+        .unwrap();
+
+        let paths: Vec<&str> = report.artifacts.iter().map(|a| a.path.as_str()).collect();
+        assert!(paths.contains(&root.join("work").join("web").join("node_modules").display().to_string().as_str()), "{paths:?}");
+        assert!(paths.contains(&root.join("work").join("web").join("dist").display().to_string().as_str()), "{paths:?}");
+        assert!(paths.contains(&root.join("work").join("rust").join("target").display().to_string().as_str()), "{paths:?}");
+        assert_eq!(report.scanned_projects, 2);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn global_caches_require_an_anchor_and_the_opt_in() {
         let _guard = FIXTURE_LOCK.lock().unwrap();
         let root = fixture("global");
