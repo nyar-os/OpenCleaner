@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, Result,
+    Error, Result, anchors,
     dev::rules,
     platform,
     safety::{self, DEFAULT_AGE_DAYS, ProcessPaths},
@@ -48,6 +48,13 @@ pub struct TempSkips {
     pub process_temp: u64,
     /// Directories hosting the executable image of a running process.
     pub program_shielded: u64,
+    /// Files whose own timestamp is old while a directory on their path, below
+    /// the root, holds content written inside the age threshold.
+    pub dir_recent: u64,
+    /// Directories excluded because they hold a project manifest anchor.
+    pub dev_root: u64,
+    /// Files inside an operator-declared build root.
+    pub build_root: u64,
     pub unreadable: u64,
 }
 
@@ -177,6 +184,62 @@ fn is_in_shielded_dir(dir: &Path, shielded: &[PathBuf]) -> bool {
     shielded.iter().any(|entry| safety::is_within(entry, dir))
 }
 
+/// What one directory says about itself, read from its direct entries only.
+/// A directory count is not a file count: the newest direct entry decides
+/// whether the directory is still being written to, and any manifest name
+/// marks it as a project root.
+#[derive(Debug, Clone, Copy, Default)]
+struct DirState {
+    newest_entry_recent: bool,
+    project_root: bool,
+}
+
+fn inspect_dir(dir: &Path, cutoff_ms: u64, threshold_ms: u64) -> DirState {
+    let mut state = DirState::default();
+    let Ok(read) = std::fs::read_dir(dir)
+    else {
+        return state;
+    };
+    for entry in read.flatten() {
+        if state.newest_entry_recent && state.project_root {
+            break;
+        }
+        let Ok(meta) = entry.metadata()
+        else {
+            continue;
+        };
+        if !state.project_root && meta.is_file() && rules::ManifestKind::from_os_name(&entry.file_name()).is_some() {
+            state.project_root = true;
+        }
+        if state.newest_entry_recent {
+            continue;
+        }
+        if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
+            continue;
+        }
+        if let Some(modified_ms) = modified_unix_ms(&meta)
+            && modified_ms.saturating_add(threshold_ms) > cutoff_ms
+        {
+            state.newest_entry_recent = true;
+        }
+    }
+    state
+}
+
+fn declared_build_roots(warnings: &mut Vec<String>) -> Vec<PathBuf> {
+    let config = match anchors::build_root_config(anchors::BuildRootOptions::default()) {
+        Ok(config) => config,
+        Err(error) => {
+            warnings.push(format!("declared build roots could not be read, none are excluded: {error}"));
+            return Vec::new();
+        }
+    };
+    if !config.exists {
+        return Vec::new();
+    }
+    config.declarations.into_iter().map(|entry| PathBuf::from(entry.path)).filter(|path| path.is_absolute()).collect()
+}
+
 fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOutput> {
     let paths = safety::process_paths();
     let temp_dirs: Vec<PathBuf> = paths
@@ -212,8 +275,16 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
     }
 
     let threshold_ms = threshold_days_value * 24 * 60 * 60 * 1000;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let build_roots = declared_build_roots(&mut output.warnings);
+    let mut stack = vec![(root.to_path_buf(), false)];
+    while let Some((dir, dir_recent)) = stack.pop() {
+        let is_root = safety::path_key(&dir) == safety::path_key(root);
+        let state = if is_root { DirState::default() } else { inspect_dir(&dir, cutoff_ms, threshold_ms) };
+        if state.project_root {
+            output.skipped.dev_root += 1;
+            continue;
+        }
+        let dir_recent = dir_recent || state.newest_entry_recent;
         let read = match std::fs::read_dir(&dir) {
             Ok(read) => read,
             Err(error) => {
@@ -261,7 +332,7 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
                     output.skipped.program_shielded += 1;
                     continue;
                 }
-                stack.push(path);
+                stack.push((path, dir_recent));
                 continue;
             }
             if !meta.is_file() {
@@ -275,6 +346,10 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
                 output.skipped.protected += 1;
                 continue;
             }
+            if build_roots.iter().any(|entry| safety::is_within(entry, &path)) {
+                output.skipped.build_root += 1;
+                continue;
+            }
             output.scanned_files += 1;
             output.scanned_bytes = output.scanned_bytes.saturating_add(meta.len());
             let Some(modified_ms) = modified_unix_ms(&meta)
@@ -284,6 +359,10 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
             };
             if modified_ms.saturating_add(threshold_ms) > cutoff_ms {
                 output.skipped.recent += 1;
+                continue;
+            }
+            if dir_recent {
+                output.skipped.dir_recent += 1;
                 continue;
             }
             output.candidates.push(Candidate { path, bytes: meta.len(), age_days: age_days(cutoff_ms, threshold_ms, modified_ms) });
@@ -538,6 +617,54 @@ mod tests {
         assert!(report.items[0].reason.is_empty());
         assert!(!old.exists());
         assert!(fresh.exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stale_file_in_a_directory_with_newer_content_is_skipped() {
+        let root = unique_root("temp-dir-recent");
+        write_file(&root.join("active").join("stale.bin"), 1024, 30);
+        write_file(&root.join("active").join("fresh.log"), 512, 0);
+        let report =
+            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        assert_eq!(report.candidate_files, 0);
+        assert_eq!(report.skipped.dir_recent, 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stale_directory_without_newer_content_stays_a_candidate() {
+        let root = unique_root("temp-dir-idle");
+        write_file(&root.join("idle").join("stale.bin"), 1024, 30);
+        let report =
+            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        assert_eq!(report.candidate_files, 1);
+        assert_eq!(report.skipped.dir_recent, 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn nested_stale_file_under_an_active_ancestor_is_skipped() {
+        let root = unique_root("temp-dir-nested");
+        write_file(&root.join("active").join("fresh.log"), 512, 0);
+        write_file(&root.join("active").join("nested").join("stale.bin"), 1024, 30);
+        let report =
+            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        assert_eq!(report.candidate_files, 0);
+        assert_eq!(report.skipped.dir_recent, 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn project_anchor_directory_is_excluded() {
+        let root = unique_root("temp-dev-root");
+        write_file(&root.join("project").join("stale.bin"), 1024, 30);
+        write_file(&root.join("project").join("package.json"), 8, 30);
+        write_file(&root.join("plain").join("stale.bin"), 1024, 30);
+        let report =
+            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        assert_eq!(report.candidate_files, 1);
+        assert_eq!(report.skipped.dev_root, 1);
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -333,6 +333,12 @@ export type TempSkips = {
     processTemp: number;
     /** Directories hosting the image of a running process. */
     programShielded: number;
+    /** Old files whose path holds a directory with newer content. */
+    dirRecent: number;
+    /** Directories excluded because they hold a project manifest anchor. */
+    devRoot: number;
+    /** Files inside an operator-declared build root. */
+    buildRoot: number;
     unreadable: number;
 };
 

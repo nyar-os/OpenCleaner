@@ -388,6 +388,9 @@ const SKIP_REASONS = [
     ["cwdShielded", "process working directory"],
     ["processTemp", "process temp directory"],
     ["programShielded", "running program image directory"],
+    ["dirRecent", "a directory on the path holds newer content"],
+    ["devRoot", "directory holds a project manifest"],
+    ["buildRoot", "inside a declared build root"],
     ["unreadable", "unreadable entry"],
 ];
 const ITEM_DISPLAY_LIMIT = 300;
