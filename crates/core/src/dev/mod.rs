@@ -396,6 +396,17 @@ fn default_remover(path: &Path, mode: DeleteMode) -> Result<CleanStatus> {
     }
 }
 
+/// Shared removal entry for the other cleanup domains, so every domain deletes
+/// through the same trash/permanent implementation instead of growing its own.
+pub(crate) fn remove_artifact(path: &Path, mode: DeleteMode) -> Result<CleanStatus> {
+    default_remover(path, mode)
+}
+
+/// Whether the recycle-bin path exists on this build and platform.
+pub(crate) fn trash_supported() -> bool {
+    trash::supported()
+}
+
 fn dev_clean_with(
     options: DevCleanOptions,
     dirs: &BaseDirs,
@@ -953,7 +964,7 @@ fn resolve_roots(input: &[String]) -> Result<Vec<PathBuf>> {
 /// Path-only safety gates: never a repository or SDK root, never a link, and
 /// always a directory. Cheap enough to run for every item right before the
 /// probe.
-fn gate_path(path: &Path, dirs: &BaseDirs) -> Option<SkipReason> {
+pub(crate) fn gate_path(path: &Path, dirs: &BaseDirs) -> Option<SkipReason> {
     if rules::is_protected(path) || is_base_dir(path, dirs) || rules::is_installed_program_path(path) {
         return Some(SkipReason::ProtectedPath);
     }
@@ -973,7 +984,7 @@ fn gate_path(path: &Path, dirs: &BaseDirs) -> Option<SkipReason> {
 /// Execution-time rule gate: the path must still be justified by an anchor in
 /// its owning project, or be a declared level-2 cache. Re-derived from the
 /// filesystem so a caller cannot hand in an arbitrary directory.
-fn resolve_artifact(path: &Path, dirs: &BaseDirs) -> std::result::Result<(), SkipReason> {
+pub(crate) fn resolve_artifact(path: &Path, dirs: &BaseDirs) -> std::result::Result<(), SkipReason> {
     if !path.is_absolute() {
         return Err(SkipReason::RuleMismatch);
     }

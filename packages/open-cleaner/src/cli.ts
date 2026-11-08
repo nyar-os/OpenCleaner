@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { createCli } from '@wae/commander';
 import {
     auditQuery,
+    buildDirClean,
+    buildDirPlan,
     buildDirScan,
     buildRootClean,
     buildRootPlan,
@@ -29,7 +31,7 @@ import {
     tempPlan,
     version,
 } from './index.js';
-import type { ActorKind, DeleteMode, DevProfile, PathScope } from './index.js';
+import type { ActorKind, BuildDirPlan, DeleteMode, DevProfile, PathScope } from './index.js';
 
 function formatBytes(n: number): string {
     if (n < 1024) return `${n} B`;
@@ -507,20 +509,68 @@ cli.command('build-roots', 'cli.cmd.buildRoots')
         }
     });
 
+function printBuildDirPlan(plan: BuildDirPlan): void {
+    console.log(`cwd: ${plan.cwd}`);
+    console.log(`mode: ${plan.mode}${plan.modeSupported ? '' : ' (unsupported on this platform, execution will fail)'}`);
+    console.log(`depths: ${plan.depthByRoot.map((item) => `${item.path} @ ${item.depth}`).join('  ') || 'none'}`);
+    console.log(
+        `candidates: ${plan.items.length}  total: ${formatBytes(plan.totalBytes)}  removable: ${formatBytes(plan.removableBytes)}  in build-roots: ${formatBytes(plan.bytesInBuildRoots)}`,
+    );
+    for (const total of plan.ownerTotals) {
+        console.log(`  owner ${total.owner}: ${total.items} items, ${formatBytes(total.bytes)} total, ${formatBytes(total.removableBytes)} removable`);
+    }
+    for (const item of plan.items) {
+        const status = item.removable ? 'removable' : `skip: ${item.skipReason}`;
+        console.log(`\n${formatBytes(item.bytes).padStart(10)}  ${item.path}  [${item.owner}]  ${status}`);
+        if (item.alsoInBuildRoots) console.log('              also declared in build-roots (that config owns it)');
+        if (item.skipDetail) console.log(`              ${item.skipDetail}`);
+        for (const claim of item.claims) {
+            console.log(`              ${claim.winner ? 'winner' : 'claim '} ${claim.source}: ${claim.detail}`);
+            for (const path of claim.evidence) console.log(`                     evidence: ${path}`);
+        }
+    }
+    for (const warning of plan.warnings) console.log(`warning: ${warning}`);
+    console.log('\na plan deletes nothing.');
+}
+
 cli.command('build-dirs', 'cli.cmd.buildDirs')
     .option('--cwd <path>', 'cli.opt.cwd')
     .option('--root <path>...', 'cli.opt.probeRoot')
     .option('--min-bytes <n>', 'cli.opt.minBytes', integerOption('min-bytes', 1))
     .option('--depth <n>', 'cli.opt.depth', integerOption('depth', 1))
+    .option('--plan', 'cli.opt.plan')
+    .option('--mode <mode>', 'cli.opt.mode')
+    .option('--yes', 'cli.opt.yes')
     .actionCtx(async (options) => {
         applyActor(options);
+        const mode = deleteMode(text(options, 'mode'), capabilities().trash);
+        const planOptions = {
+            cwd: text(options, 'cwd'),
+            roots: list(options, 'root'),
+            minBytes: numberOption(options, 'min-bytes'),
+            depth: numberOption(options, 'depth'),
+        };
         try {
-            const report = buildDirScan({
-                cwd: text(options, 'cwd'),
-                roots: list(options, 'root'),
-                minBytes: numberOption(options, 'min-bytes'),
-                depth: numberOption(options, 'depth'),
-            });
+            if (flag(options, 'yes')) {
+                const plan = buildDirPlan(planOptions, mode);
+                printBuildDirPlan(plan);
+                if (!plan.modeSupported) throw new Error(`delete mode ${plan.mode} cannot run on this platform`);
+                const targets = plan.items.filter((item) => item.removable).map((item) => ({ path: item.path, owner: item.owner }));
+                const clean = buildDirClean({ cwd: text(options, 'cwd'), targets, mode, confirm: true });
+                console.log('\ndeleted:');
+                for (const item of clean.items) {
+                    const reason = item.reason ? `  ${item.reason}` : '';
+                    console.log(`  ${item.status.padEnd(8)} ${formatBytes(item.bytes).padStart(10)}  ${item.path}  [${item.owner}]${reason}`);
+                }
+                console.log(`freed: ${formatBytes(clean.freedBytes)}`);
+                for (const warning of clean.warnings) console.log(`warning: ${warning}`);
+                return 0;
+            }
+            if (flag(options, 'plan')) {
+                printBuildDirPlan(buildDirPlan(planOptions, mode));
+                return 0;
+            }
+            const report = buildDirScan(planOptions);
             console.log(`cwd: ${report.cwd}`);
             const accepted = report.declarations.filter((item) => item.accepted).length;
             const valid = report.declarations.filter((item) => item.valid).length;

@@ -24,8 +24,23 @@
 //! only compared for overlap, and a match it already covers is excluded from
 //! this domain's unique byte total.
 //!
-//! This domain is read-only. It has no plan step and no delete step, and its
-//! output cannot be handed to any cleanup call.
+//! Planning merges the three sources that can name one directory: a Cargo
+//! declaration, a marker pair, and a manifest anchor owned by the dev domain.
+//! Merging is by normalized absolute path, and the strongest source owns the
+//! path: `declaration` > `cargo-markers` > `manifest-anchor`. Every merged item
+//! keeps all its claims but exactly one winner, so one directory can never
+//! produce two plan items or two owners.
+//!
+//! The probe depth is deliberately asymmetric. The environment temp directory
+//! is a flat one-shot area whose real build output sits one or two levels
+//! deeper, so that root alone is probed to [`TEMP_ROOT_DEPTH`]. Every other
+//! root keeps the caller's depth, because raising it for a volume root would
+//! walk user profiles and system directories instead of closing a gap.
+//!
+//! Execution never trusts a plan-time decision. Before each removal the winning
+//! source is re-derived from disk, the tree is measured again, a recent write
+//! skips the item, and the occupancy probe runs immediately before the delete.
+//! Both the plan and the clean run are recorded as separate audit entries.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -37,6 +52,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Error, Result,
+    dev::{CleanStatus, DeleteMode, DevScanOptions, SkipReason},
     locations::{BaseDirs, base_dirs},
     platform, safety,
 };
@@ -51,9 +67,19 @@ const CONFIG_FILE: &str = "config.toml";
 const LEGACY_CONFIG_FILE: &str = "config";
 /// Default size floor for the uncovered-directory list.
 pub const DEFAULT_MIN_BYTES: u64 = 512 * 1024 * 1024;
+/// Depth used for the environment temp directory. That root is a flat area of
+/// one-shot directories, so output sits a level deeper than elsewhere. No other
+/// root receives this depth.
+pub const TEMP_ROOT_DEPTH: usize = 4;
+/// Upper bound for a caller-supplied depth.
+const MAX_DEPTH: usize = 4;
 
 fn default_min_bytes() -> u64 {
     DEFAULT_MIN_BYTES
+}
+
+fn default_delete_mode() -> crate::dev::DeleteMode {
+    crate::dev::DeleteMode::Trash
 }
 
 /// Which explicit declaration produced an entry.
@@ -100,7 +126,7 @@ impl BuildDirOptions {
     fn resolved_depth(&self) -> usize {
         match self.depth {
             0 => default_depth(),
-            value => value.min(3),
+            value => value.min(MAX_DEPTH),
         }
     }
 }
@@ -145,11 +171,22 @@ pub enum MatchAttribution {
     CargoMarkers,
 }
 
+/// One probe root with the depth that was actually applied to it. The temp
+/// root is the only one that receives [`TEMP_ROOT_DEPTH`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootDepth {
+    pub path: String,
+    pub depth: usize,
+}
+
 /// A directory proven to be Cargo build output by marker files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildOutputMatch {
     pub path: String,
     pub bytes: u64,
+    /// Newest file modification time inside the matched tree, so a plan can
+    /// refuse a directory that is still being written.
+    pub newest_unix_ms: Option<u64>,
     /// Absolute paths of the marker files that satisfied the rule.
     pub evidence: Vec<String>,
     pub attribution: MatchAttribution,
@@ -209,6 +246,9 @@ pub struct BuildDirReport {
     /// Source of that declaration.
     pub effective_source: Option<String>,
     pub roots: Vec<String>,
+    /// The depth that was applied to each root, so the temp-root asymmetry is
+    /// visible in the report instead of hidden in the options.
+    pub depth_by_root: Vec<RootDepth>,
     /// Config file the overlap comparison read, when one was found.
     pub build_root_config: Option<String>,
     /// Directories proven to be Cargo build output by markers.
@@ -275,8 +315,12 @@ fn build_dir_report(
         .collect();
 
     let mut output = ProbeOutput::default();
+    let base_depth = options.resolved_depth();
+    let mut depth_by_root = Vec::with_capacity(roots.len());
     for root in &roots {
-        scan_root(root, options.resolved_depth(), &declarations, options.resolved_min_bytes(), &mut output, &mut warnings);
+        let depth = effective_depth(root, base_depth);
+        depth_by_root.push(RootDepth { path: root.display().to_string(), depth });
+        scan_root(root, depth, &declarations, options.resolved_min_bytes(), &mut output, &mut warnings);
     }
     let mut matches = output.matches;
     let mut rejected = output.rejected;
@@ -306,6 +350,7 @@ fn build_dir_report(
         effective_source: effective.map(|item| item.source.clone()),
         declarations,
         roots: roots.iter().map(|path| path.display().to_string()).collect(),
+        depth_by_root,
         build_root_config: config_path,
         matches,
         rejected,
@@ -544,6 +589,13 @@ fn default_depth() -> usize {
     2
 }
 
+/// The temp root alone is probed deeper. The asymmetry is intentional: the
+/// temp directory is a flat area of one-shot directories, while a volume root
+/// would start walking user profiles and system directories if it were raised.
+fn effective_depth(root: &Path, base: usize) -> usize {
+    if safety::path_key(root) == safety::path_key(&std::env::temp_dir()) { base.max(TEMP_ROOT_DEPTH) } else { base }
+}
+
 fn child_dir(entry: &fs::DirEntry) -> Option<PathBuf> {
     let meta = entry.metadata().ok()?;
     if !meta.is_dir() || platform::is_link_like(&meta) || meta.file_type().is_symlink() {
@@ -654,10 +706,12 @@ struct ProbeOutput {
     matches: Vec<BuildOutputMatch>,
     rejected: Vec<RejectedDirectory>,
     uncovered: Vec<UncoveredDirectory>,
-    measured: BTreeMap<String, u64>,
+    /// Usage of every directory the probe walked, keyed by normalized path.
+    /// The plan reuses it instead of walking a proven match a second time.
+    measured: BTreeMap<String, safety::Usage>,
 }
 
-fn push_match(path: &Path, bytes: u64, evidence: Vec<PathBuf>, declarations: &[BuildDirDeclaration], output: &mut ProbeOutput) {
+fn push_match(path: &Path, usage: safety::Usage, evidence: Vec<PathBuf>, declarations: &[BuildDirDeclaration], output: &mut ProbeOutput) {
     let evidence: Vec<String> = evidence.iter().map(|item| item.display().to_string()).collect();
     if let Some(reason) = refusal(path) {
         output.rejected.push(RejectedDirectory { path: path.display().to_string(), evidence, reason });
@@ -665,7 +719,8 @@ fn push_match(path: &Path, bytes: u64, evidence: Vec<PathBuf>, declarations: &[B
     }
     output.matches.push(BuildOutputMatch {
         path: path.display().to_string(),
-        bytes,
+        bytes: usage.bytes,
+        newest_unix_ms: usage.newest_unix_ms,
         evidence,
         attribution: MatchAttribution::CargoMarkers,
         reason: format!("{TAG_NAME} is present together with a Cargo-specific marker"),
@@ -727,9 +782,9 @@ fn scan_root(
         // A hit ends the walk here: descending into a build output would only
         // report the same bytes again under a nested name.
         if let Some(evidence) = cargo_build_evidence(&path) {
-            let bytes = safety::collect_usage(&path).bytes;
-            output.measured.insert(safety::path_key(&path), bytes);
-            push_match(&path, bytes, evidence, declarations, output);
+            let usage = safety::collect_usage(&path);
+            output.measured.insert(safety::path_key(&path), usage);
+            push_match(&path, usage, evidence, declarations, output);
             continue;
         }
 
@@ -742,7 +797,7 @@ fn scan_root(
         if usage.errors > 0 {
             unreadable += 1;
         }
-        output.measured.insert(safety::path_key(&path), usage.bytes);
+        output.measured.insert(safety::path_key(&path), usage);
         if usage.bytes < min_bytes {
             continue;
         }
@@ -778,9 +833,9 @@ fn probe_below(container: &Path, level: usize, depth: usize, declarations: &[Bui
     let mut found = false;
     for child in immediate_dirs(container) {
         if let Some(evidence) = cargo_build_evidence(&child) {
-            let bytes = safety::collect_usage(&child).bytes;
-            output.measured.entry(safety::path_key(&child)).or_insert(bytes);
-            push_match(&child, bytes, evidence, declarations, output);
+            let usage = safety::collect_usage(&child);
+            output.measured.entry(safety::path_key(&child)).or_insert(usage);
+            push_match(&child, usage, evidence, declarations, output);
             found = true;
             continue;
         }
@@ -828,13 +883,13 @@ fn build_root_declarations(config: Option<&Path>, warnings: &mut Vec<String>) ->
 fn compare_build_roots(
     declarations: Vec<crate::anchors::BuildRootDeclaration>,
     matches: &mut [BuildOutputMatch],
-    measured: &BTreeMap<String, u64>,
+    measured: &BTreeMap<String, safety::Usage>,
 ) -> Vec<BuildRootOverlap> {
     let mut overlaps = Vec::new();
     for declaration in declarations {
         let declared = PathBuf::from(&declaration.path);
         let exists = declared.is_dir();
-        let bytes = measured.get(&safety::path_key(&declared)).copied();
+        let bytes = measured.get(&safety::path_key(&declared)).map(|usage| usage.bytes);
         let covers = matches.iter().filter(|item| safety::is_within(&declared, Path::new(&item.path))).count();
         let inside = matches.iter().any(|item| safety::is_within(Path::new(&item.path), &declared));
         if covers > 0 {
@@ -991,6 +1046,601 @@ fn parse_toml_string(raw: &str) -> std::result::Result<String, String> {
 
 fn trailing_is_empty(rest: &str) -> std::result::Result<(), ()> {
     if rest.trim().is_empty() { Ok(()) } else { Err(()) }
+}
+
+/// Which source names one directory. Variants are declared strongest first so
+/// `min()` selects the owner, and the order is the documented priority:
+/// `declaration` > `cargo-markers` > `manifest-anchor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaimSource {
+    /// `CARGO_TARGET_DIR` or `build.target-dir`.
+    Declaration,
+    /// `CACHEDIR.TAG` plus a Cargo-specific marker at the same directory.
+    CargoMarkers,
+    /// A manifest anchor that the dev domain already owns.
+    ManifestAnchor,
+}
+
+impl ClaimSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Declaration => "declaration",
+            Self::CargoMarkers => "cargo-markers",
+            Self::ManifestAnchor => "manifest-anchor",
+        }
+    }
+}
+
+/// One source that names the path. Every claim is kept even when another
+/// source wins, and `winner` marks the single owner of the merged item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateClaim {
+    pub source: ClaimSource,
+    /// What this source saw, in one sentence.
+    pub detail: String,
+    /// Absolute evidence files, or the declaring source for a declaration.
+    pub evidence: Vec<String>,
+    pub winner: bool,
+}
+
+/// Why a planned candidate cannot be removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BuildDirSkipReason {
+    ProtectedPath,
+    NotFound,
+    NotADirectory,
+    SymlinkNotFollowed,
+    /// The newest entry was written within the freshness window.
+    RecentWrite,
+    /// The marker pair no longer holds on disk.
+    EvidenceMissing,
+    /// No accepted, effective declaration names this path any more.
+    DeclarationGone,
+    /// The anchor's project manifest is gone.
+    ManifestMissing,
+    /// The path no longer matches a rule for its suffix.
+    RuleMismatch,
+    /// A process holds the directory open.
+    InUseOrLocked,
+    /// The operator-declared build-root config owns this path.
+    BuildRootOwned,
+}
+
+impl BuildDirSkipReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProtectedPath => "protected-path",
+            Self::NotFound => "not-found",
+            Self::NotADirectory => "not-a-directory",
+            Self::SymlinkNotFollowed => "symlink-not-followed",
+            Self::RecentWrite => "recent-write",
+            Self::EvidenceMissing => "evidence-missing",
+            Self::DeclarationGone => "declaration-gone",
+            Self::ManifestMissing => "manifest-missing",
+            Self::RuleMismatch => "rule-mismatch",
+            Self::InUseOrLocked => "in-use-or-locked",
+            Self::BuildRootOwned => "build-root-owned",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildDirPlanItem {
+    pub path: String,
+    pub bytes: u64,
+    /// The source that won. Exactly one claim carries `winner = true`.
+    pub owner: ClaimSource,
+    pub claims: Vec<CandidateClaim>,
+    pub removable: bool,
+    pub skip_reason: Option<BuildDirSkipReason>,
+    pub skip_detail: Option<String>,
+    /// The path lies inside the operator-declared build-root config, which
+    /// owns it and keeps it out of this domain's removable total.
+    pub also_in_build_roots: bool,
+}
+
+/// Per-owner totals, so the report shows who won how much.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildDirOwnerTotal {
+    pub owner: ClaimSource,
+    pub items: u64,
+    pub bytes: u64,
+    pub removable_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildDirPlan {
+    pub cwd: String,
+    pub roots: Vec<String>,
+    pub depth_by_root: Vec<RootDepth>,
+    pub mode: DeleteMode,
+    /// False when the requested mode cannot run on this platform/build. The
+    /// plan stays inspectable, and the clean call then fails instead of
+    /// downgrading to a different delete.
+    pub mode_supported: bool,
+    pub items: Vec<BuildDirPlanItem>,
+    pub owner_totals: Vec<BuildDirOwnerTotal>,
+    pub total_bytes: u64,
+    pub removable_bytes: u64,
+    pub skipped_bytes: u64,
+    /// Part of `total_bytes` that the build-root config already counts.
+    pub bytes_in_build_roots: u64,
+    pub build_root_config: Option<String>,
+    pub warnings: Vec<String>,
+    pub planned_at_unix_ms: u64,
+}
+
+/// One path handed to `build_dir_clean`, with the owner the plan reported.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildDirCleanTarget {
+    pub path: String,
+    pub owner: ClaimSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildDirCleanOptions {
+    /// Directory whose Cargo configuration is resolved again before deleting.
+    pub cwd: Option<String>,
+    pub targets: Vec<BuildDirCleanTarget>,
+    #[serde(default = "default_delete_mode")]
+    pub mode: DeleteMode,
+    pub confirm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildDirCleanItem {
+    pub path: String,
+    pub owner: ClaimSource,
+    pub bytes: u64,
+    pub status: CleanStatus,
+    pub reason: Option<String>,
+    /// Evidence re-derived from disk immediately before the delete.
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildDirCleanReport {
+    pub mode: DeleteMode,
+    pub executed: bool,
+    pub items: Vec<BuildDirCleanItem>,
+    pub freed_bytes: u64,
+    pub warnings: Vec<String>,
+    pub finished_at_unix_ms: u64,
+}
+
+/// Measurement attached to a claim by the source that produced it.
+#[derive(Debug, Clone, Copy)]
+struct ClaimMeasurement {
+    bytes: u64,
+    newest_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct RawClaim {
+    source: ClaimSource,
+    detail: String,
+    evidence: Vec<String>,
+    measurement: Option<ClaimMeasurement>,
+}
+
+/// One directory claimed by at least one source. The map key is the normalized
+/// path, which is what makes two sources naming the same directory merge into
+/// exactly one item.
+#[derive(Debug, Clone)]
+struct MergedCandidate {
+    path: String,
+    claims: Vec<RawClaim>,
+}
+
+fn push_claim(
+    merged: &mut BTreeMap<String, MergedCandidate>,
+    path: &str,
+    source: ClaimSource,
+    detail: String,
+    evidence: Vec<String>,
+    measurement: Option<ClaimMeasurement>,
+) {
+    let key = safety::path_key(Path::new(path));
+    let entry = merged.entry(key).or_insert_with(|| MergedCandidate { path: path.to_string(), claims: Vec::new() });
+    if entry.claims.iter().any(|claim| claim.source == source) {
+        return;
+    }
+    entry.claims.push(RawClaim { source, detail, evidence, measurement });
+}
+
+fn written_recently(newest_unix_ms: Option<u64>, now: u64) -> bool {
+    newest_unix_ms.is_some_and(|stamp| stamp.saturating_add(safety::RECENT_WRITE_MS) > now)
+}
+
+fn gate_reason(reason: SkipReason) -> BuildDirSkipReason {
+    match reason {
+        SkipReason::SymlinkNotFollowed => BuildDirSkipReason::SymlinkNotFollowed,
+        SkipReason::ProtectedPath => BuildDirSkipReason::ProtectedPath,
+        SkipReason::ManifestMissing => BuildDirSkipReason::ManifestMissing,
+        SkipReason::RuleMismatch => BuildDirSkipReason::RuleMismatch,
+        SkipReason::NotFound => BuildDirSkipReason::NotFound,
+        SkipReason::NotADirectory => BuildDirSkipReason::NotADirectory,
+        SkipReason::InUseOrLocked => BuildDirSkipReason::InUseOrLocked,
+    }
+}
+
+/// The manifest files that still justify an anchor-owned path. Re-read from
+/// disk so the report carries delete-time evidence, not the plan's.
+fn anchor_evidence(path: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    for (rule, root) in crate::dev::rules::match_rules_suffix(path) {
+        if !crate::dev::rules::detect_manifests(&root).contains(&rule.anchor) {
+            continue;
+        }
+        let Ok(read) = fs::read_dir(&root)
+        else {
+            continue;
+        };
+        for entry in read.flatten() {
+            if crate::dev::rules::ManifestKind::from_os_name(&entry.file_name()) == Some(rule.anchor) {
+                files.push(entry.path().display().to_string());
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Read-only plan. Nothing is measured outside the given roots, nothing is
+/// deleted, and the occupancy probe is deliberately absent: it runs only next
+/// to a real delete.
+pub fn build_dir_plan(options: BuildDirOptions, mode: DeleteMode) -> Result<BuildDirPlan> {
+    let env = |key: &str| std::env::var(key).ok();
+    let build_roots = crate::anchors::default_build_root_config();
+    build_dir_plan_with(options, mode, &env, &base_dirs(), build_roots.as_deref())
+}
+
+fn build_dir_plan_with(
+    options: BuildDirOptions,
+    mode: DeleteMode,
+    env: &dyn Fn(&str) -> Option<String>,
+    dirs: &BaseDirs,
+    build_root_config: Option<&Path>,
+) -> Result<BuildDirPlan> {
+    let report = build_dir_report(options, env, dirs, build_root_config)?;
+    let mut warnings = report.warnings.clone();
+    warnings.push("the occupancy probe runs immediately before each delete and never during the plan".to_string());
+    warnings.push("the winning source is re-derived from disk before every delete, so a plan-time result is never trusted".to_string());
+    warnings.push(format!(
+        "owner priority is {} > {} > {}",
+        ClaimSource::Declaration.as_str(),
+        ClaimSource::CargoMarkers.as_str(),
+        ClaimSource::ManifestAnchor.as_str()
+    ));
+
+    let build_root_paths: Vec<PathBuf> = report.build_roots.iter().filter(|item| item.exists).map(|item| PathBuf::from(&item.path)).collect();
+
+    let mut merged: BTreeMap<String, MergedCandidate> = BTreeMap::new();
+    for declaration in report.declarations.iter().filter(|item| item.accepted && item.valid && item.effective) {
+        push_claim(
+            &mut merged,
+            &declaration.resolved,
+            ClaimSource::Declaration,
+            format!("{ENV_KEY}/{CONFIG_KEY}: {} = {} -> {}", declaration.source, declaration.raw, declaration.resolved),
+            vec![declaration.source.clone()],
+            None,
+        );
+    }
+    for item in &report.matches {
+        push_claim(
+            &mut merged,
+            &item.path,
+            ClaimSource::CargoMarkers,
+            item.reason.clone(),
+            item.evidence.clone(),
+            Some(ClaimMeasurement { bytes: item.bytes, newest_unix_ms: item.newest_unix_ms }),
+        );
+    }
+
+    for artifact in anchor_artifacts(&report, &mut warnings) {
+        let evidence = artifact.project_root.as_deref().map(Path::new).map(anchor_evidence).unwrap_or_default();
+        let detail = format!("{} at project root {}", artifact.rule, artifact.project_root.as_deref().unwrap_or("<unknown>"));
+        push_claim(&mut merged, &artifact.path, ClaimSource::ManifestAnchor, detail, evidence, None);
+    }
+
+    let now = safety::now_unix_ms();
+    let mut items = Vec::with_capacity(merged.len());
+    for candidate in merged.into_values() {
+        let mut claims: Vec<CandidateClaim> = candidate
+            .claims
+            .iter()
+            .map(|claim| CandidateClaim { source: claim.source, detail: claim.detail.clone(), evidence: claim.evidence.clone(), winner: false })
+            .collect();
+        claims.sort_by_key(|claim| claim.source);
+        let owner = claims.iter().map(|claim| claim.source).min().unwrap_or(ClaimSource::ManifestAnchor);
+        for claim in claims.iter_mut() {
+            claim.winner = claim.source == owner;
+        }
+
+        // A marker match was already measured by the scan, so its tree is not
+        // walked twice. Every other candidate is measured here, which is what
+        // gives the freshness gate a timestamp for it.
+        let measurement =
+            candidate.claims.iter().find(|claim| claim.source == ClaimSource::CargoMarkers).and_then(|claim| claim.measurement).unwrap_or_else(
+                || {
+                    let usage = safety::collect_usage(Path::new(&candidate.path));
+                    ClaimMeasurement { bytes: usage.bytes, newest_unix_ms: usage.newest_unix_ms }
+                },
+            );
+
+        let build_root = build_root_paths.iter().find(|root| safety::is_within(root, Path::new(&candidate.path)));
+        let skip = plan_gate(Path::new(&candidate.path), dirs, measurement.newest_unix_ms, now, build_root);
+        items.push(BuildDirPlanItem {
+            path: candidate.path,
+            bytes: measurement.bytes,
+            owner,
+            claims,
+            removable: skip.is_none(),
+            skip_reason: skip.as_ref().map(|(reason, _)| *reason),
+            skip_detail: skip.map(|(_, detail)| detail),
+            also_in_build_roots: build_root.is_some(),
+        });
+    }
+    items.sort_by(|left, right| right.bytes.cmp(&left.bytes).then_with(|| left.path.cmp(&right.path)));
+
+    let total_bytes: u64 = items.iter().map(|item| item.bytes).sum();
+    let removable_bytes: u64 = items.iter().filter(|item| item.removable).map(|item| item.bytes).sum();
+    let skipped_bytes = total_bytes.saturating_sub(removable_bytes);
+    let bytes_in_build_roots: u64 = items.iter().filter(|item| item.also_in_build_roots).map(|item| item.bytes).sum();
+
+    let mut owner_totals: Vec<BuildDirOwnerTotal> = Vec::new();
+    for owner in [ClaimSource::Declaration, ClaimSource::CargoMarkers, ClaimSource::ManifestAnchor] {
+        let owned: Vec<&BuildDirPlanItem> = items.iter().filter(|item| item.owner == owner).collect();
+        if owned.is_empty() {
+            continue;
+        }
+        owner_totals.push(BuildDirOwnerTotal {
+            owner,
+            items: owned.len() as u64,
+            bytes: owned.iter().map(|item| item.bytes).sum(),
+            removable_bytes: owned.iter().filter(|item| item.removable).map(|item| item.bytes).sum(),
+        });
+    }
+
+    let mode_supported = match mode {
+        DeleteMode::Permanent => true,
+        DeleteMode::Trash => crate::dev::trash_supported(),
+    };
+    if !mode_supported {
+        warnings.push(format!("delete mode {mode:?} is not available on this platform or build, so execution will fail"));
+    }
+
+    Ok(BuildDirPlan {
+        cwd: report.cwd,
+        roots: report.roots,
+        depth_by_root: report.depth_by_root,
+        mode,
+        mode_supported,
+        items,
+        owner_totals,
+        total_bytes,
+        removable_bytes,
+        skipped_bytes,
+        bytes_in_build_roots,
+        build_root_config: report.build_root_config,
+        warnings,
+        planned_at_unix_ms: now,
+    })
+}
+
+/// The dev domain's level-1 artifacts for the same roots. A level-2 cache is
+/// not included: it is never preselected and its owner is a different rule.
+fn anchor_artifacts(report: &BuildDirReport, warnings: &mut Vec<String>) -> Vec<crate::dev::DevArtifact> {
+    let roots: Vec<String> = report.depth_by_root.iter().map(|item| item.path.clone()).filter(|path| Path::new(path).is_dir()).collect();
+    if roots.is_empty() {
+        warnings.push("no probe root exists, so no manifest anchor could be collected".to_string());
+        return Vec::new();
+    }
+    let options = DevScanOptions { roots, include_global: false, max_depth: None, limit: None };
+    match crate::dev::dev_scan(options) {
+        Ok(scan) => scan.artifacts.into_iter().filter(|artifact| artifact.level == 1).collect(),
+        Err(error) => {
+            warnings.push(format!("manifest anchors could not be collected: {error}"));
+            Vec::new()
+        }
+    }
+}
+
+fn plan_gate(
+    path: &Path,
+    dirs: &BaseDirs,
+    newest_unix_ms: Option<u64>,
+    now: u64,
+    build_root: Option<&PathBuf>,
+) -> Option<(BuildDirSkipReason, String)> {
+    if let Some(reason) = refusal(path) {
+        return Some((BuildDirSkipReason::ProtectedPath, reason));
+    }
+    if let Some(reason) = crate::dev::gate_path(path, dirs) {
+        return Some((gate_reason(reason), reason.as_str().to_string()));
+    }
+    if written_recently(newest_unix_ms, now) {
+        return Some((BuildDirSkipReason::RecentWrite, "the newest entry was written within the last 10 minutes".to_string()));
+    }
+    build_root.map(|root| {
+        (BuildDirSkipReason::BuildRootOwned, format!("inside the operator-declared build root {}; that config owns the path", root.display()))
+    })
+}
+
+/// Explicit clean. Every target is re-validated from disk first: the winning
+/// source must still prove the path, the tree is measured again, a recent write
+/// skips it, and the occupancy probe runs directly before the delete. A failed
+/// delete is never reported as freed bytes, and a delete that leaves the path
+/// behind is a failure even when the call returned success.
+pub fn build_dir_clean(options: BuildDirCleanOptions) -> Result<BuildDirCleanReport> {
+    let env = |key: &str| std::env::var(key).ok();
+    let dirs = base_dirs();
+    build_dir_clean_with(options, &env, &dirs)
+}
+
+fn build_dir_clean_with(options: BuildDirCleanOptions, env: &dyn Fn(&str) -> Option<String>, dirs: &BaseDirs) -> Result<BuildDirCleanReport> {
+    if !options.confirm {
+        return Err(Error::Message("build-dir clean requires explicit confirmation (confirm=true)".to_string()));
+    }
+    if options.mode == DeleteMode::Trash && !crate::dev::trash_supported() {
+        return Err(Error::not_implemented("build-dir-trash"));
+    }
+
+    let cwd = resolve_cwd(options.cwd.as_deref(), "build-dirs")?;
+    let mut warnings = vec![
+        "every target is re-validated against the filesystem before anything is deleted, and the plan-time decision is not reused".to_string(),
+        "the occupancy probe is taken immediately before each delete".to_string(),
+    ];
+    let mut declarations = collect_declarations(&cwd, env, dirs, &mut warnings);
+    apply_precedence(&mut declarations);
+
+    let now = safety::now_unix_ms();
+    let mut items = Vec::with_capacity(options.targets.len());
+    let mut freed_bytes = 0u64;
+    for target in &options.targets {
+        let path = PathBuf::from(target.path.trim());
+        let mut bytes = 0u64;
+
+        let evidence = match revalidate(&path, target.owner, &declarations, dirs, &mut bytes, now) {
+            Ok(evidence) => evidence,
+            Err((reason, detail)) => {
+                items.push(BuildDirCleanItem {
+                    path: path.display().to_string(),
+                    owner: target.owner,
+                    bytes,
+                    status: CleanStatus::Skipped,
+                    reason: Some(format!("{}: {detail}", reason.as_str())),
+                    evidence: Vec::new(),
+                });
+                continue;
+            }
+        };
+
+        // The probe is the last check before removal, so a directory another
+        // process opened after the measurement is skipped instead of failing
+        // halfway through the delete.
+        if safety::probe_dir_in_use(&path) {
+            items.push(BuildDirCleanItem {
+                path: path.display().to_string(),
+                owner: target.owner,
+                bytes,
+                status: CleanStatus::Skipped,
+                reason: Some(format!("{}: a process holds the directory open", BuildDirSkipReason::InUseOrLocked.as_str())),
+                evidence,
+            });
+            continue;
+        }
+
+        match crate::dev::remove_artifact(&path, options.mode) {
+            Err(error) => {
+                items.push(BuildDirCleanItem {
+                    path: path.display().to_string(),
+                    owner: target.owner,
+                    bytes,
+                    status: CleanStatus::Failed,
+                    reason: Some(error.to_string()),
+                    evidence,
+                });
+            }
+            Ok(status) => {
+                if path.exists() {
+                    items.push(BuildDirCleanItem {
+                        path: path.display().to_string(),
+                        owner: target.owner,
+                        bytes,
+                        status: CleanStatus::Failed,
+                        reason: Some(format!("the path still exists after the delete reported {status:?}")),
+                        evidence,
+                    });
+                }
+                else {
+                    freed_bytes = freed_bytes.saturating_add(bytes);
+                    items.push(BuildDirCleanItem {
+                        path: path.display().to_string(),
+                        owner: target.owner,
+                        bytes,
+                        status,
+                        reason: None,
+                        evidence,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(BuildDirCleanReport { mode: options.mode, executed: true, items, freed_bytes, warnings, finished_at_unix_ms: safety::now_unix_ms() })
+}
+
+/// Delete-time gate for one target. Returns the evidence that still holds, or
+/// the reason the item is skipped. The recorded owner must still win; a
+/// fallback to a weaker source is not accepted, because the plan promised one
+/// owner and a silent downgrade would hide that the decision changed.
+fn revalidate(
+    path: &Path,
+    owner: ClaimSource,
+    declarations: &[BuildDirDeclaration],
+    dirs: &BaseDirs,
+    bytes: &mut u64,
+    now: u64,
+) -> std::result::Result<Vec<String>, (BuildDirSkipReason, String)> {
+    if let Some(reason) = refusal(path) {
+        return Err((BuildDirSkipReason::ProtectedPath, reason));
+    }
+    if let Some(reason) = crate::dev::gate_path(path, dirs) {
+        return Err((gate_reason(reason), reason.as_str().to_string()));
+    }
+    let evidence = match owner {
+        ClaimSource::Declaration => {
+            let found = declarations.iter().find(|item| {
+                item.accepted && item.valid && item.effective && safety::path_key(Path::new(&item.resolved)) == safety::path_key(path)
+            });
+            match found {
+                Some(declaration) => vec![declaration.source.clone(), declaring_source(declaration)],
+                None => {
+                    return Err((
+                        BuildDirSkipReason::DeclarationGone,
+                        "no accepted, effective declaration names this path any more".to_string(),
+                    ));
+                }
+            }
+        }
+        ClaimSource::CargoMarkers => match cargo_build_evidence(path) {
+            Some(files) => files.iter().map(|file| file.display().to_string()).collect(),
+            None => {
+                return Err((
+                    BuildDirSkipReason::EvidenceMissing,
+                    format!("{TAG_NAME} together with a Cargo-specific marker is no longer present at this directory"),
+                ));
+            }
+        },
+        ClaimSource::ManifestAnchor => {
+            if let Err(reason) = crate::dev::resolve_artifact(path, dirs) {
+                let mapped = gate_reason(reason);
+                return Err((mapped, format!("the manifest anchor no longer holds ({})", reason.as_str())));
+            }
+            anchor_evidence(path)
+        }
+    };
+
+    let usage = safety::collect_usage(path);
+    *bytes = usage.bytes;
+    if written_recently(usage.newest_unix_ms, now) {
+        return Err((BuildDirSkipReason::RecentWrite, "the newest entry was written within the last 10 minutes".to_string()));
+    }
+    Ok(evidence)
+}
+
+fn resolve_cwd(value: Option<&str>, capability: &'static str) -> Result<PathBuf> {
+    match value.map(str::trim).filter(|item| !item.is_empty()) {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            Ok(normalize(&std::path::absolute(&path).unwrap_or(path)))
+        }
+        None => std::env::current_dir().map_err(|error| Error::Message(format!("{capability}: no working directory: {error}"))),
+    }
 }
 
 #[cfg(test)]
@@ -1268,7 +1918,7 @@ mod tests {
 
         let mut output = ProbeOutput::default();
         let evidence = vec![PathBuf::from(r"C:\Windows\sample").join(TAG_NAME)];
-        push_match(Path::new(r"C:\Windows\sample"), 1, evidence, &[], &mut output);
+        push_match(Path::new(r"C:\Windows\sample"), safety::Usage::default(), evidence, &[], &mut output);
         assert!(output.matches.is_empty());
         assert_eq!(output.rejected.len(), 1);
         assert!(output.rejected[0].reason.contains("system"));
@@ -1374,6 +2024,240 @@ mod tests {
             assert!(!declaration.accepted);
             assert!(declaration.reason.as_deref().unwrap().contains("drive-relative"));
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn age_tree(root: &Path, seconds: u64) {
+        let stamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        for entry in fs::read_dir(root).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                age_tree(&path, seconds);
+            }
+            else {
+                fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(stamp).unwrap();
+            }
+        }
+    }
+
+    /// A directory that satisfies the marker rule and then some.
+    fn proven_output(dir: &Path) {
+        tag(dir);
+        write(&dir.join(".rustc_info.json"), "{}");
+        write(&dir.join("debug").join(FINGERPRINT_DIR).join("sample"), "x");
+        write(&dir.join("blob.bin"), &"x".repeat(4096));
+    }
+
+    fn plan_with(root: &Path, env_value: Option<&str>, config: Option<&Path>, mode: DeleteMode) -> BuildDirPlan {
+        let env = move |key: &str| if key == ENV_KEY { env_value.map(str::to_string) } else { None };
+        let options = BuildDirOptions {
+            cwd: Some(root.display().to_string()),
+            roots: vec![root.display().to_string()],
+            min_bytes: 1,
+            ..BuildDirOptions::default()
+        };
+        build_dir_plan_with(options, mode, &env, &empty_dirs(), config).unwrap()
+    }
+
+    fn clean_with(root: &Path, env_value: Option<&str>, targets: Vec<BuildDirCleanTarget>, confirm: bool) -> BuildDirCleanReport {
+        let env = move |key: &str| if key == ENV_KEY { env_value.map(str::to_string) } else { None };
+        build_dir_clean_with(
+            BuildDirCleanOptions { cwd: Some(root.display().to_string()), targets, mode: DeleteMode::Permanent, confirm },
+            &env,
+            &empty_dirs(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_directory_named_by_all_three_sources_is_one_item_owned_by_the_declaration() {
+        let root = synthetic_root("three-sources");
+        let project = root.join("project");
+        write(&project.join("Cargo.toml"), "[package]\nname = \"sample\"\n");
+        let output = project.join("target");
+        proven_output(&output);
+
+        write(&root.join(".cargo").join("config.toml"), &format!("[build]\ntarget-dir = '{}'\n", output.display()));
+        age_tree(&output, 1);
+
+        let plan = plan_with(&root, None, None, DeleteMode::Permanent);
+
+        let matches: Vec<&str> = plan.items.iter().map(|item| item.path.as_str()).collect();
+        assert_eq!(matches, vec![output.display().to_string()], "three sources must merge into one plan item");
+        let item = &plan.items[0];
+        assert_eq!(item.owner, ClaimSource::Declaration, "the declaration owns the path");
+        let sources: Vec<ClaimSource> = item.claims.iter().map(|claim| claim.source).collect();
+        assert_eq!(sources, vec![ClaimSource::Declaration, ClaimSource::CargoMarkers, ClaimSource::ManifestAnchor]);
+        assert_eq!(item.claims.iter().filter(|claim| claim.winner).count(), 1, "exactly one owner");
+        assert!(item.claims.iter().find(|claim| claim.source == ClaimSource::Declaration).unwrap().winner);
+        assert!(
+            item.claims
+                .iter()
+                .find(|claim| claim.source == ClaimSource::CargoMarkers)
+                .unwrap()
+                .evidence
+                .iter()
+                .any(|value| value.ends_with(TAG_NAME))
+        );
+        assert_eq!(plan.owner_totals.len(), 1);
+        assert_eq!(plan.owner_totals[0].owner, ClaimSource::Declaration);
+        assert_eq!(plan.owner_totals[0].items, 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_marker_only_directory_is_owned_by_the_marker_and_an_anchor_only_one_by_the_anchor() {
+        let root = synthetic_root("owners");
+        let plain = root.join("plain-output");
+        proven_output(&plain);
+
+        let project = root.join("project");
+        write(&project.join("Cargo.toml"), "[package]\nname = \"sample\"\n");
+        let anchored = project.join("target");
+        write(&anchored.join("blob.bin"), &"x".repeat(2048));
+
+        let plan = plan_with(&root, None, None, DeleteMode::Permanent);
+
+        let marker = plan.items.iter().find(|item| item.path == plain.display().to_string()).unwrap();
+        assert_eq!(marker.owner, ClaimSource::CargoMarkers);
+        assert_eq!(marker.claims.len(), 1);
+
+        let anchor = plan.items.iter().find(|item| item.path == anchored.display().to_string()).unwrap();
+        assert_eq!(anchor.owner, ClaimSource::ManifestAnchor);
+        assert!(anchor.claims[0].detail.contains("Cargo.toml"), "{}", anchor.claims[0].detail);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_plan_skips_a_recently_written_match_and_accepts_an_aged_one() {
+        let root = synthetic_root("freshness");
+        let fresh = root.join("fresh-output");
+        proven_output(&fresh);
+        let aged = root.join("aged-output");
+        proven_output(&aged);
+        age_tree(&aged, 1);
+
+        let plan = plan_with(&root, None, None, DeleteMode::Permanent);
+
+        let fresh_item = plan.items.iter().find(|item| item.path == fresh.display().to_string()).unwrap();
+        assert!(!fresh_item.removable);
+        assert_eq!(fresh_item.skip_reason, Some(BuildDirSkipReason::RecentWrite));
+        let aged_item = plan.items.iter().find(|item| item.path == aged.display().to_string()).unwrap();
+        assert!(aged_item.removable, "{:?}", aged_item.skip_detail);
+        assert!(plan.removable_bytes >= aged_item.bytes);
+        assert!(plan.warnings.iter().any(|warning| warning.contains("occupancy probe")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_match_inside_the_operator_build_root_config_is_not_removable_here() {
+        let root = synthetic_root("build-root-owned");
+        let output = root.join("declared-output");
+        proven_output(&output);
+        age_tree(&output, 1);
+        let config = root.join("build-roots.conf");
+        write(&config, &format!("# operator declaration\n{}\n", output.display()));
+
+        let plan = plan_with(&root, None, Some(&config), DeleteMode::Permanent);
+
+        let item = plan.items.iter().find(|item| item.path == output.display().to_string()).unwrap();
+        assert!(item.also_in_build_roots);
+        assert!(!item.removable);
+        assert_eq!(item.skip_reason, Some(BuildDirSkipReason::BuildRootOwned));
+        assert_eq!(plan.bytes_in_build_roots, item.bytes);
+        assert_eq!(plan.removable_bytes, 0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_the_temp_root_gets_the_deeper_probe() {
+        assert_eq!(effective_depth(&std::env::temp_dir(), default_depth()), TEMP_ROOT_DEPTH);
+        assert_eq!(effective_depth(Path::new(r"C:\"), default_depth()), default_depth());
+        assert_eq!(effective_depth(Path::new(r"C:\Users"), default_depth()), default_depth());
+
+        let root = synthetic_root("depth-asymmetry");
+        let report = probe_report(&root, None, BuildDirOptions::default());
+        assert_eq!(report.depth_by_root.len(), 1);
+        assert_eq!(report.depth_by_root[0].path, root.display().to_string());
+        assert_eq!(report.depth_by_root[0].depth, default_depth(), "a normal root keeps the caller depth");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_removes_a_marker_proven_directory_after_rechecking_disk_evidence() {
+        let root = synthetic_root("clean");
+        let output = root.join("output");
+        proven_output(&output);
+        age_tree(&output, 1);
+
+        let report =
+            clean_with(&root, None, vec![BuildDirCleanTarget { path: output.display().to_string(), owner: ClaimSource::CargoMarkers }], true);
+
+        let item = &report.items[0];
+        assert_eq!(item.status, CleanStatus::Deleted, "{:?}", item.reason);
+        assert!(item.evidence.iter().any(|value| value.ends_with(TAG_NAME)), "delete-time evidence is recorded");
+        assert!(item.evidence.iter().all(|value| Path::new(value).is_absolute()));
+        assert!(!output.exists());
+        assert_eq!(report.freed_bytes, item.bytes);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_skips_a_match_whose_marker_pair_is_gone() {
+        let root = synthetic_root("evidence-gone");
+        let output = root.join("output");
+        proven_output(&output);
+        age_tree(&output, 1);
+        fs::remove_file(output.join(TAG_NAME)).unwrap();
+
+        let report =
+            clean_with(&root, None, vec![BuildDirCleanTarget { path: output.display().to_string(), owner: ClaimSource::CargoMarkers }], true);
+
+        let item = &report.items[0];
+        assert_eq!(item.status, CleanStatus::Skipped);
+        assert!(item.reason.as_deref().unwrap().contains(BuildDirSkipReason::EvidenceMissing.as_str()), "{:?}", item.reason);
+        assert!(output.exists(), "nothing may be deleted without a fresh proof");
+        assert_eq!(report.freed_bytes, 0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_skips_a_declaration_that_no_longer_names_the_path() {
+        let root = synthetic_root("declaration-gone");
+        let output = root.join("declared-output");
+        proven_output(&output);
+        age_tree(&output, 1);
+
+        let report =
+            clean_with(&root, None, vec![BuildDirCleanTarget { path: output.display().to_string(), owner: ClaimSource::Declaration }], true);
+
+        let item = &report.items[0];
+        assert_eq!(item.status, CleanStatus::Skipped);
+        assert!(item.reason.as_deref().unwrap().contains(BuildDirSkipReason::DeclarationGone.as_str()), "{:?}", item.reason);
+        assert!(output.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_refuses_to_run_without_confirmation() {
+        let root = synthetic_root("confirm");
+        let output = root.join("output");
+        proven_output(&output);
+        age_tree(&output, 1);
+
+        let result = build_dir_clean_with(
+            BuildDirCleanOptions {
+                cwd: Some(root.display().to_string()),
+                targets: vec![BuildDirCleanTarget { path: output.display().to_string(), owner: ClaimSource::CargoMarkers }],
+                mode: DeleteMode::Permanent,
+                confirm: false,
+            },
+            &no_env,
+            &empty_dirs(),
+        );
+
+        assert!(result.is_err());
+        assert!(output.exists());
         let _ = fs::remove_dir_all(&root);
     }
 }

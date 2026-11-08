@@ -497,7 +497,11 @@ export type BuildDirOptions = {
     roots?: string[];
     /** Size floor for the uncovered list, in bytes. */
     minBytes?: number;
-    /** Levels inspected below each root. 1 inspects only the root's children. */
+    /**
+     * Levels inspected below each root. 1 inspects only the root's children.
+     * The environment temp directory is always probed to 4 because it is a flat
+     * area of one-shot directories; every other root keeps this value.
+     */
     depth?: number;
 };
 
@@ -527,6 +531,8 @@ export type MatchAttribution = 'cargo-markers';
 export type BuildOutputMatch = {
     path: string;
     bytes: number;
+    /** Newest file modification time inside the matched tree. */
+    newestUnixMs?: number | null;
     /** Absolute paths of the marker files that satisfied the rule. */
     evidence: string[];
     attribution: MatchAttribution;
@@ -566,12 +572,20 @@ export type UncoveredDirectory = {
     alsoInBuildRoots: boolean;
 };
 
+/** One probe root with the depth that was applied to it. */
+export type RootDepth = {
+    path: string;
+    depth: number;
+};
+
 export type BuildDirReport = {
     cwd: string;
     declarations: BuildDirDeclaration[];
     effectivePath?: string | null;
     effectiveSource?: string | null;
     roots: string[];
+    /** Applied depth per root; the temp root alone gets 4. */
+    depthByRoot: RootDepth[];
     /** Build-root config read for the overlap comparison, when one was found. */
     buildRootConfig?: string | null;
     matches: BuildOutputMatch[];
@@ -584,6 +598,109 @@ export type BuildDirReport = {
     uniqueMatchedBytes: number;
     warnings: string[];
     scannedAtUnixMs: number;
+};
+
+/**
+ * Which source names a directory. The order is the ownership priority:
+ * `declaration` > `cargo-markers` > `manifest-anchor`.
+ */
+export type ClaimSource = 'declaration' | 'cargo-markers' | 'manifest-anchor';
+
+/** One source that names a planned path; `winner` marks the single owner. */
+export type CandidateClaim = {
+    source: ClaimSource;
+    detail: string;
+    /** Absolute evidence files, or the declaring source for a declaration. */
+    evidence: string[];
+    winner: boolean;
+};
+
+export type BuildDirSkipReason =
+    | 'protected-path'
+    | 'not-found'
+    | 'not-a-directory'
+    | 'symlink-not-followed'
+    | 'recent-write'
+    | 'evidence-missing'
+    | 'declaration-gone'
+    | 'manifest-missing'
+    | 'rule-mismatch'
+    | 'in-use-or-locked'
+    | 'build-root-owned';
+
+/**
+ * One directory in the plan. Sources naming the same normalized path merge
+ * here, so one path yields exactly one item and one owner.
+ */
+export type BuildDirPlanItem = {
+    path: string;
+    bytes: number;
+    owner: ClaimSource;
+    claims: CandidateClaim[];
+    removable: boolean;
+    skipReason?: BuildDirSkipReason | null;
+    skipDetail?: string | null;
+    /** The separate build-root config owns this path and its bytes. */
+    alsoInBuildRoots: boolean;
+};
+
+export type BuildDirOwnerTotal = {
+    owner: ClaimSource;
+    items: number;
+    bytes: number;
+    removableBytes: number;
+};
+
+export type BuildDirPlan = {
+    cwd: string;
+    roots: string[];
+    depthByRoot: RootDepth[];
+    mode: DeleteMode;
+    /** False when the mode cannot run here; execution must fail, not downgrade. */
+    modeSupported: boolean;
+    items: BuildDirPlanItem[];
+    ownerTotals: BuildDirOwnerTotal[];
+    totalBytes: number;
+    removableBytes: number;
+    skippedBytes: number;
+    /** Part of `totalBytes` that the build-root config already counts. */
+    bytesInBuildRoots: number;
+    buildRootConfig?: string | null;
+    warnings: string[];
+    plannedAtUnixMs: number;
+};
+
+/** One path handed to `buildDirClean`, with the owner the plan reported. */
+export type BuildDirCleanTarget = {
+    path: string;
+    owner: ClaimSource;
+};
+
+export type BuildDirCleanOptions = {
+    /** Directory whose Cargo configuration is resolved again before deleting. */
+    cwd?: string;
+    targets: BuildDirCleanTarget[];
+    mode?: DeleteMode;
+    confirm: boolean;
+};
+
+export type BuildDirCleanItem = {
+    path: string;
+    owner: ClaimSource;
+    bytes: number;
+    status: DevCleanStatus;
+    reason?: string | null;
+    /** Evidence re-derived from disk immediately before the delete. */
+    evidence: string[];
+};
+
+export type BuildDirCleanReport = {
+    mode: DeleteMode;
+    executed: boolean;
+    items: BuildDirCleanItem[];
+    freedBytes: number;
+    warnings: string[];
+    finishedAtUnixMs: number;
 };
 
 export type Capabilities = {
@@ -676,6 +793,8 @@ type NativeBinding = {
     buildRootPlan(optionsJson?: string): BuildRootPlan;
     buildRootClean(optionsJson: string): BuildRootCleanReport;
     buildDirScan(optionsJson?: string): BuildDirReport;
+    buildDirPlan(optionsJson?: string, mode?: DeleteMode): BuildDirPlan;
+    buildDirClean(optionsJson: string): BuildDirCleanReport;
     version(): string;
     openGui(options?: OpenGuiOptions): void;
     pumpEvents(): boolean;

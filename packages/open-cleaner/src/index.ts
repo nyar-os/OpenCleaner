@@ -27,7 +27,10 @@ import {
     type ScanReport,
     type SoftwareOptions,
     type SoftwareReport,
+    type BuildDirCleanOptions,
+    type BuildDirCleanReport,
     type BuildDirOptions,
+    type BuildDirPlan,
     type BuildDirReport,
     type BuildRootCleanOptions,
     type BuildRootCleanReport,
@@ -177,10 +180,28 @@ export function buildRootPlan(options: BuildRootOptions = {}): BuildRootPlan {
  * Read-only discovery of Cargo build output: explicit declarations
  * (`CARGO_TARGET_DIR` and `build.target-dir`), plus directories under explicit
  * probe roots proven by `CACHEDIR.TAG` together with a Cargo-specific marker.
- * There is no plan or delete counterpart for this report.
+ * The temp root alone is probed one level deeper than the other roots.
  */
 export function buildDirScan(options: BuildDirOptions = {}): BuildDirReport {
     return loadNative().buildDirScan(JSON.stringify(options));
+}
+
+/**
+ * Inspectable plan that merges declarations, marker matches and manifest
+ * anchors by normalized path. One path yields one item with one owner:
+ * `declaration` > `cargo-markers` > `manifest-anchor`.
+ */
+export function buildDirPlan(options: BuildDirOptions = {}, mode: DeleteMode = 'trash'): BuildDirPlan {
+    return loadNative().buildDirPlan(JSON.stringify(options), mode);
+}
+
+/**
+ * Delete the targets of a plan. Every target is re-validated from disk first:
+ * the winning source must still hold, a recent write skips it, and the
+ * occupancy probe runs immediately before the delete.
+ */
+export function buildDirClean(options: BuildDirCleanOptions): BuildDirCleanReport {
+    return loadNative().buildDirClean(JSON.stringify(options));
 }
 
 /** Delete declared build roots; each path must still be declared at clean time. */
@@ -189,13 +210,24 @@ export function buildRootClean(options: BuildRootCleanOptions): BuildRootCleanRe
 }
 
 export type {
+    BuildDirCleanItem,
+    BuildDirCleanOptions,
+    BuildDirCleanReport,
+    BuildDirCleanTarget,
     BuildDirDeclaration,
     BuildDirOptions,
+    BuildDirOwnerTotal,
+    BuildDirPlan,
+    BuildDirPlanItem,
     BuildDirReport,
+    BuildDirSkipReason,
     BuildOutputMatch,
     BuildRootOverlap,
+    CandidateClaim,
+    ClaimSource,
     MatchAttribution,
     RejectedDirectory,
+    RootDepth,
     UncoveredDirectory,
 } from './native.js';
 

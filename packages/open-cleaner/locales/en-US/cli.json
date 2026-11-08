@@ -10,7 +10,7 @@
             "software": "Find leftover install and config directories from uninstalled products",
             "temp": "Reclaim the temp directory file by file: only files older than 7 days by default, each occupancy-probed",
             "buildRoots": "Clean only the build roots declared in the config file (dry-run by default)",
-            "buildDirs": "Discover external Cargo build directories from explicit declarations and Cargo markers (read-only, no deletion)",
+            "buildDirs": "Discover external Cargo build directories from explicit declarations, Cargo markers and manifest anchors (read-only by default, --plan prints a plan, --yes deletes)",
             "audit": "Print the append-only capability audit history as JSON lines",
             "gui": "Open the GUI window",
             "version": "Print the package version"
@@ -42,7 +42,8 @@
             "cwd": "Working directory whose Cargo configuration is resolved (default: current directory)",
             "probeRoot": "Root probed for build output (repeatable, only CACHEDIR.TAG plus a Cargo marker, never a directory name)",
             "minBytes": "Size floor for uncovered directories in bytes (default 536870912, 512 MB)",
-            "depth": "Levels inspected below each root (default 2. 1 inspects only that root's immediate children)"
+            "plan": "Print the merged plan only: one item and one owner per path",
+            "depth": "Levels inspected below each root (default 2. 1 inspects only that root's immediate children. The temp root is always 4, and that asymmetry is intentional)"
         }
     }
 }

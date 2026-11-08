@@ -13,10 +13,11 @@ mod audit;
 use std::{cell::RefCell, path::PathBuf};
 
 use open_cleaner_core::{
-    BuildDirOptions, BuildRootCleanOptions, BuildRootOptions, CapabilityState, DeleteMode, DevCleanOptions, DevScanOptions,
-    EnvPathCleanOptions, EnvPathOptions, Error as CoreError, RegistryOptions, RegistryResidueOptions, ScanOptions, SoftwareOptions,
-    TempCleanOptions, TempOptions, build_dir_scan, build_root_clean, build_root_config, build_root_plan, capabilities, dev_clean, dev_plan,
-    dev_scan, env_path_clean, env_path_scan, registry_residue_scan, registry_scan, scan, software_residue_scan, temp_clean, temp_plan,
+    BuildDirCleanOptions, BuildDirOptions, BuildRootCleanOptions, BuildRootOptions, CapabilityState, CleanStatus, DeleteMode, DevCleanOptions,
+    DevScanOptions, EnvPathCleanOptions, EnvPathOptions, Error as CoreError, RegistryOptions, RegistryResidueOptions, ScanOptions,
+    SoftwareOptions, TempCleanOptions, TempOptions, build_dir_clean, build_dir_plan, build_dir_scan, build_root_clean, build_root_config,
+    build_root_plan, capabilities, dev_clean, dev_plan, dev_scan, env_path_clean, env_path_scan, registry_residue_scan, registry_scan, scan,
+    software_residue_scan, temp_clean, temp_plan,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -397,6 +398,26 @@ fn build_dir_scan_js(ctx: CallContext) -> Result<JsValue> {
     report_value_to_js(ctx.env(), &audited_build_dir_scan(options, params)?)
 }
 
+#[function(js_name = "buildDirPlan")]
+fn build_dir_plan_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: BuildDirOptions = parse_options(raw.as_ref())?;
+    let mode = match ctx.arg(1) {
+        Ok(value) if !value.is_undefined()? => delete_mode(Some(value.as_string()?.as_str()))?,
+        _ => delete_mode(None)?,
+    };
+    let request = json!({ "options": raw.unwrap_or(Value::Null), "mode": mode });
+    report_value_to_js(ctx.env(), &audited_build_dir_plan(options, mode, request)?)
+}
+
+#[function(js_name = "buildDirClean")]
+fn build_dir_clean_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: BuildDirCleanOptions = require_options(raw.as_ref(), "buildDirClean")?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_build_dir_clean(options, params)?)
+}
+
 #[function(js_name = "registryResidueScan")]
 fn registry_residue_scan_js(ctx: CallContext) -> Result<JsValue> {
     let raw = json_string_arg(&ctx, 0)?;
@@ -765,6 +786,65 @@ fn audited_build_dir_scan(options: BuildDirOptions, params: Value) -> Result<ope
     .map_err(core_error)
 }
 
+/// The plan record keeps the evidence for every candidate, so a later delete
+/// can be compared against what the plan actually claimed.
+fn audited_build_dir_plan(options: BuildDirOptions, mode: DeleteMode, request: Value) -> Result<open_cleaner_core::BuildDirPlan> {
+    let planned = match build_dir_plan(options, mode) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let message = error.to_string();
+            let _ = audit::run::<()>("build-dir-plan", Mode::DryRun, request, || Err(CoreError::Message(message)));
+            return Err(core_error(error));
+        }
+    };
+    let candidates: Vec<Value> = planned
+        .items
+        .iter()
+        .map(|item| {
+            let claims: Vec<Value> = item
+                .claims
+                .iter()
+                .map(|claim| {
+                    json!({
+                        "source": claim.source.as_str(),
+                        "detail": claim.detail,
+                        "evidence": claim.evidence,
+                        "winner": claim.winner,
+                    })
+                })
+                .collect();
+            json!({
+                "path": item.path,
+                "owner": item.owner.as_str(),
+                "removable": item.removable,
+                "skipReason": item.skip_reason.map(|reason| reason.as_str()),
+                "claims": claims,
+            })
+        })
+        .collect();
+    let removable = planned.items.iter().filter(|item| item.removable).count() as u64;
+    let summary = format!(
+        "{removable} of {} candidates removable, {} bytes, {} bytes already counted by build-roots",
+        planned.items.len(),
+        planned.removable_bytes,
+        planned.bytes_in_build_roots
+    );
+    let params = json!({ "request": request, "candidates": candidates });
+    audit::run("build-dir-plan", Mode::DryRun, params, || Ok((planned, audit::Summary::new(removable, summary)))).map_err(core_error)
+}
+
+fn audited_build_dir_clean(options: BuildDirCleanOptions, params: Value) -> Result<open_cleaner_core::BuildDirCleanReport> {
+    let targets: Vec<Value> = options.targets.iter().map(|target| json!({ "path": target.path, "owner": target.owner.as_str() })).collect();
+    let params = json!({ "request": params, "targets": targets });
+    audit::run("build-dir-clean", Mode::Execute, params, || {
+        let report = build_dir_clean(options)?;
+        let count = report.items.iter().filter(|item| matches!(item.status, CleanStatus::Deleted | CleanStatus::Trashed)).count() as u64;
+        let summary = format!("{count} of {} targets removed, {} bytes freed", report.items.len(), report.freed_bytes);
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)
+}
+
 fn audited_dev_scan(options: DevScanOptions, params: Value) -> Result<open_cleaner_core::DevScanReport> {
     audit::run("dev-scan", Mode::DryRun, params, || {
         let report = dev_scan(options)?;
@@ -952,6 +1032,8 @@ register_module![
     build_root_plan_js,
     build_root_clean_js,
     build_dir_scan_js,
+    build_dir_plan_js,
+    build_dir_clean_js,
     open_gui,
     pump_events,
     close_gui,

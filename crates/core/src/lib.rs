@@ -26,8 +26,10 @@ pub use anchors::{
     BuildRootPlan, build_root_clean, build_root_config, build_root_plan, default_build_root_config, parse_build_root_config,
 };
 pub use build_dirs::{
-    BuildDirDeclaration, BuildDirOptions, BuildDirReport, BuildOutputMatch, BuildRootOverlap, DeclarationOrigin, MatchAttribution,
-    RejectedDirectory, UncoveredDirectory, build_dir_scan,
+    BuildDirCleanItem, BuildDirCleanOptions, BuildDirCleanReport, BuildDirCleanTarget, BuildDirDeclaration, BuildDirOptions,
+    BuildDirOwnerTotal, BuildDirPlan, BuildDirPlanItem, BuildDirReport, BuildDirSkipReason, BuildOutputMatch, BuildRootOverlap, CandidateClaim,
+    ClaimSource, DeclarationOrigin, MatchAttribution, RejectedDirectory, RootDepth, UncoveredDirectory, build_dir_clean, build_dir_plan,
+    build_dir_scan,
 };
 pub use dev::{
     CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevCleanTarget, DevPlan, DevPlanItem, DevProfile,
