@@ -13,10 +13,10 @@ mod audit;
 use std::{cell::RefCell, path::PathBuf};
 
 use open_cleaner_core::{
-    BuildRootCleanOptions, BuildRootOptions, CapabilityState, DeleteMode, DevCleanOptions, DevScanOptions, EnvPathCleanOptions, EnvPathOptions,
-    Error as CoreError, RegistryOptions, RegistryResidueOptions, ScanOptions, SoftwareOptions, TempCleanOptions, TempOptions, build_root_clean,
-    build_root_config, build_root_plan, capabilities, dev_clean, dev_plan, dev_scan, env_path_clean, env_path_scan, registry_residue_scan,
-    registry_scan, scan, software_residue_scan, temp_clean, temp_plan,
+    BuildDirOptions, BuildRootCleanOptions, BuildRootOptions, CapabilityState, DeleteMode, DevCleanOptions, DevScanOptions,
+    EnvPathCleanOptions, EnvPathOptions, Error as CoreError, RegistryOptions, RegistryResidueOptions, ScanOptions, SoftwareOptions,
+    TempCleanOptions, TempOptions, build_dir_scan, build_root_clean, build_root_config, build_root_plan, capabilities, dev_clean, dev_plan,
+    dev_scan, env_path_clean, env_path_scan, registry_residue_scan, registry_scan, scan, software_residue_scan, temp_clean, temp_plan,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -389,6 +389,14 @@ fn build_root_clean_js(ctx: CallContext) -> Result<JsValue> {
     report_value_to_js(ctx.env(), &audited_build_root_clean(options, params)?)
 }
 
+#[function(js_name = "buildDirScan")]
+fn build_dir_scan_js(ctx: CallContext) -> Result<JsValue> {
+    let raw = json_string_arg(&ctx, 0)?;
+    let options: BuildDirOptions = parse_options(raw.as_ref())?;
+    let params = raw.unwrap_or(Value::Null);
+    report_value_to_js(ctx.env(), &audited_build_dir_scan(options, params)?)
+}
+
 #[function(js_name = "registryResidueScan")]
 fn registry_residue_scan_js(ctx: CallContext) -> Result<JsValue> {
     let raw = json_string_arg(&ctx, 0)?;
@@ -742,6 +750,16 @@ fn snake_case_key(key: &str) -> String {
     out
 }
 
+fn audited_build_dir_scan(options: BuildDirOptions, params: Value) -> Result<open_cleaner_core::BuildDirReport> {
+    audit::run("build-dir-scan", Mode::DryRun, params, || {
+        let report = build_dir_scan(options)?;
+        let count = report.declarations.len() as u64;
+        let summary = format!("{count} declarations, {} markers, {} uncovered directories", report.probes.len(), report.uncovered.len());
+        Ok((report, audit::Summary::new(count, summary)))
+    })
+    .map_err(core_error)
+}
+
 fn audited_dev_scan(options: DevScanOptions, params: Value) -> Result<open_cleaner_core::DevScanReport> {
     audit::run("dev-scan", Mode::DryRun, params, || {
         let report = dev_scan(options)?;
@@ -928,6 +946,7 @@ register_module![
     temp_clean_js,
     build_root_plan_js,
     build_root_clean_js,
+    build_dir_scan_js,
     open_gui,
     pump_events,
     close_gui,

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { createCli } from '@wae/commander';
 import {
     auditQuery,
+    buildDirScan,
     buildRootClean,
     buildRootPlan,
     capabilities,
@@ -501,6 +502,58 @@ cli.command('build-roots', 'cli.cmd.buildRoots')
             console.log(`deleted: ${report.deletedDirs} roots  freed: ${formatBytes(report.freedBytes)}`);
             for (const warning of report.warnings) console.log(`warning: ${warning}`);
             return report.items.some((item) => item.status !== 'deleted') ? 1 : 0;
+        } catch (err) {
+            return reportError(err);
+        }
+    });
+
+cli.command('build-dirs', 'cli.cmd.buildDirs')
+    .option('--cwd <path>', 'cli.opt.cwd')
+    .option('--root <path>...', 'cli.opt.probeRoot')
+    .option('--min-bytes <n>', 'cli.opt.minBytes', integerOption('min-bytes', 1))
+    .actionCtx(async (options) => {
+        applyActor(options);
+        try {
+            const report = buildDirScan({
+                cwd: text(options, 'cwd'),
+                roots: list(options, 'root'),
+                minBytes: numberOption(options, 'min-bytes'),
+            });
+            console.log(`cwd: ${report.cwd}`);
+            const accepted = report.declarations.filter((item) => item.accepted).length;
+            const valid = report.declarations.filter((item) => item.valid).length;
+            console.log(`declarations: ${report.declarations.length}  accepted: ${accepted}  valid: ${valid}`);
+            if (!report.declarations.length) {
+                console.log('no explicit declaration found: neither CARGO_TARGET_DIR nor build.target-dir');
+            }
+            for (const item of report.declarations) {
+                console.log(`\n[${item.origin}] ${item.source}  ${item.key} = "${item.raw}"`);
+                console.log(`  resolved: ${item.resolved}${item.effective ? '  (effective)' : ''}`);
+                if (item.relative) console.log(`  relative to: ${item.base}`);
+                if (item.shadowedBy) console.log(`  shadowed by: ${item.shadowedBy}`);
+                if (item.reason) console.log(`  invalid: ${item.reason}`);
+            }
+            if (report.effectivePath) console.log(`\neffective target dir: ${report.effectivePath}  (${report.effectiveSource})`);
+            if (report.probes.length) {
+                console.log('\nbuild output markers under probe roots:');
+                for (const probe of report.probes) {
+                    const state = probe.covered ? `covered by ${probe.coveredBy}` : 'no declaration';
+                    console.log(`  ${formatBytes(probe.bytes).padStart(10)}  ${probe.path}  [${probe.markers.join(', ')}]  ${state}`);
+                }
+            }
+            if (report.uncovered.length) {
+                console.log('\nuncovered directories:');
+                for (const item of report.uncovered) {
+                    const markers = item.markers.length ? item.markers.join(', ') : 'none';
+                    console.log(`  ${formatBytes(item.bytes).padStart(10)}  ${item.path}  markers: ${markers}`);
+                    console.log(`              ${item.note}`);
+                }
+                console.log('\nno declaration covers these. Nothing is selected and nothing is deleted here.');
+            } else if (report.roots.length) {
+                console.log('\nno uncovered directory at or above the size floor.');
+            }
+            for (const warning of report.warnings) console.log(`warning: ${warning}`);
+            return 0;
         } catch (err) {
             return reportError(err);
         }

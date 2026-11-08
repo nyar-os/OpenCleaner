@@ -490,6 +490,63 @@ export type BuildRootCleanReport = {
     finishedAtUnixMs: number;
 };
 
+export type BuildDirOptions = {
+    /** Directory whose Cargo configuration is resolved. Defaults to the process cwd. */
+    cwd?: string;
+    /** Directories probed one level down for output that no declaration covers. */
+    roots?: string[];
+    /** Size floor for the uncovered list, in bytes. */
+    minBytes?: number;
+};
+
+export type BuildDirDeclaration = {
+    /** `environment` for `CARGO_TARGET_DIR`, `cargo-config` for `build.target-dir`. */
+    origin: 'environment' | 'cargo-config';
+    /** Variable name, or the config file holding the key. */
+    source: string;
+    key: string;
+    /** Value exactly as written. */
+    raw: string;
+    /** Directory a relative value was resolved against. */
+    base?: string | null;
+    resolved: string;
+    relative: boolean;
+    accepted: boolean;
+    exists: boolean;
+    valid: boolean;
+    reason?: string | null;
+    shadowedBy?: string | null;
+    effective: boolean;
+};
+
+export type BuildOutputProbe = {
+    path: string;
+    bytes: number;
+    markers: string[];
+    covered: boolean;
+    coveredBy?: string | null;
+};
+
+export type UncoveredDirectory = {
+    path: string;
+    bytes: number;
+    /** Empty when nothing structurally identifies the directory as build output. */
+    markers: string[];
+    note: string;
+};
+
+export type BuildDirReport = {
+    cwd: string;
+    declarations: BuildDirDeclaration[];
+    effectivePath?: string | null;
+    effectiveSource?: string | null;
+    roots: string[];
+    probes: BuildOutputProbe[];
+    uncovered: UncoveredDirectory[];
+    warnings: string[];
+    scannedAtUnixMs: number;
+};
+
 export type Capabilities = {
     platform: string;
     arch: string;
@@ -579,6 +636,7 @@ type NativeBinding = {
     tempClean(optionsJson: string): TempCleanReport;
     buildRootPlan(optionsJson?: string): BuildRootPlan;
     buildRootClean(optionsJson: string): BuildRootCleanReport;
+    buildDirScan(optionsJson?: string): BuildDirReport;
     version(): string;
     openGui(options?: OpenGuiOptions): void;
     pumpEvents(): boolean;

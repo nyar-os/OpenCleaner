@@ -27,6 +27,8 @@ import {
     type ScanReport,
     type SoftwareOptions,
     type SoftwareReport,
+    type BuildDirOptions,
+    type BuildDirReport,
     type BuildRootCleanOptions,
     type BuildRootCleanReport,
     type BuildRootOptions,
@@ -171,10 +173,27 @@ export function buildRootPlan(options: BuildRootOptions = {}): BuildRootPlan {
     return loadNative().buildRootPlan(JSON.stringify(options));
 }
 
+/**
+ * Read-only discovery of explicit Cargo target directories: the
+ * `CARGO_TARGET_DIR` variable and `build.target-dir` in Cargo config files.
+ * There is no plan or delete counterpart for this report.
+ */
+export function buildDirScan(options: BuildDirOptions = {}): BuildDirReport {
+    return loadNative().buildDirScan(JSON.stringify(options));
+}
+
 /** Delete declared build roots; each path must still be declared at clean time. */
 export function buildRootClean(options: BuildRootCleanOptions): BuildRootCleanReport {
     return loadNative().buildRootClean(JSON.stringify(options));
 }
+
+export type {
+    BuildDirDeclaration,
+    BuildDirOptions,
+    BuildDirReport,
+    BuildOutputProbe,
+    UncoveredDirectory,
+} from './native.js';
 
 export type {
     BuildRootCleanItem,

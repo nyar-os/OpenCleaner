@@ -9,6 +9,7 @@
 //!   They never degrade silently into an empty result.
 
 pub mod anchors;
+pub mod build_dirs;
 pub mod dev;
 pub mod env;
 mod error;
@@ -23,6 +24,9 @@ pub mod temp;
 pub use anchors::{
     BuildRootCleanItem, BuildRootCleanOptions, BuildRootCleanReport, BuildRootConfig, BuildRootDeclaration, BuildRootEntry, BuildRootOptions,
     BuildRootPlan, build_root_clean, build_root_config, build_root_plan, default_build_root_config, parse_build_root_config,
+};
+pub use build_dirs::{
+    BuildDirDeclaration, BuildDirOptions, BuildDirReport, BuildOutputProbe, DeclarationOrigin, UncoveredDirectory, build_dir_scan,
 };
 pub use dev::{
     CleanStatus, DeleteMode, DevArtifact, DevCleanItem, DevCleanOptions, DevCleanReport, DevCleanTarget, DevPlan, DevPlanItem, DevProfile,
