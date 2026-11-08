@@ -206,14 +206,11 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
 
         let now_ms = crate::safety::now_unix_ms();
         let mut candidates: Vec<(SoftwareKind, String, String)> = Vec::new();
-        // With the chain empty, freshness separates a live install whose
-        // uninstall row is stale from a directory the product left behind. A
-        // single fresh match proves the product is present, so neither its
-        // install directory nor its configuration folders are leftovers.
-        let fresh_install = install_matches
-            .iter()
-            .any(|(path, _)| (ctx.newest_entry_unix_ms)(path).is_some_and(|stamp| crate::safety::is_fresh(stamp, now_ms)));
-        if fresh_install {
+
+        // A row registered with the Windows installer is the product's own
+        // registration, and that key disappears when the product is uninstalled.
+        // Its file system state therefore never establishes install residue.
+        if installer_registered(&key.values) {
             analysis.skipped.push(SoftwareSkip {
                 registry_key: key.path.clone(),
                 display_name: Some(display_name),
@@ -221,8 +218,29 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
             });
             continue;
         }
-        for (path, rule) in &install_matches {
-            candidates.push((SoftwareKind::InstallDirectory, path.clone(), rule.clone()));
+
+        // Install residue needs a recorded install path that no longer exists.
+        // A row without one has no path to invalidate, so a same-named directory
+        // is never install residue for it.
+        if install_location.is_some() {
+            // With the chain empty, freshness separates a live install whose
+            // uninstall row is stale from a directory the product left behind. A
+            // single fresh match proves the product is present, so neither its
+            // install directory nor its configuration folders are leftovers.
+            let fresh_install = install_matches
+                .iter()
+                .any(|(path, _)| (ctx.newest_entry_unix_ms)(path).is_some_and(|stamp| crate::safety::is_fresh(stamp, now_ms)));
+            if fresh_install {
+                analysis.skipped.push(SoftwareSkip {
+                    registry_key: key.path.clone(),
+                    display_name: Some(display_name),
+                    reason: "still-installed".to_string(),
+                });
+                continue;
+            }
+            for (path, rule) in &install_matches {
+                candidates.push((SoftwareKind::InstallDirectory, path.clone(), rule.clone()));
+            }
         }
 
         // Configuration and cache leftovers only exist once the app itself is
@@ -332,6 +350,18 @@ fn still_installed(values: &std::collections::BTreeMap<String, RegistryValue>, c
         }
     }
     false
+}
+
+/// A row registered with the Windows installer, either marked as an MSI product
+/// or uninstalled through `MsiExec.exe`. Such a key is the product's own
+/// registration and is removed when the product is uninstalled.
+fn installer_registered(values: &std::collections::BTreeMap<String, RegistryValue>) -> bool {
+    if dword(values, "WindowsInstaller") == Some(1) {
+        return true;
+    }
+    ["UninstallString", "QuietUninstallString"]
+        .iter()
+        .any(|name| value(values, name).is_some_and(|raw| raw.to_ascii_lowercase().contains("msiexec.exe")))
 }
 
 /// Extract the executable path from a registry command line such as
@@ -463,6 +493,15 @@ mod tests {
 "DisplayName"="Old App"
 "InstallLocation"="C:\\Program Files (x86)\\Old App\\1.0"
 
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\MsiGhost]
+"DisplayName"="Msi Ghost"
+"WindowsInstaller"=dword:00000001
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\MsiStale]
+"DisplayName"="Msi Stale"
+"InstallLocation"="C:\\Program Files\\Msi Stale\\1.0"
+"UninstallString"="MsiExec.exe /X{00000000-0000-0000-0000-000000000000}"
+
 [HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NoName]
 "InstallLocation"="C:\\Program Files\\No Name"
 "#;
@@ -519,9 +558,14 @@ mod tests {
 
     fn fixture() -> Fixture {
         let mut children = BTreeMap::new();
-        children.insert(normalized(r"C:\Program Files"), vec!["Gone App".to_string(), "Live App".to_string()]);
+        children.insert(
+            normalized(r"C:\Program Files"),
+            vec!["Gone App".to_string(), "Live App".to_string(), "Msi Ghost".to_string(), "Msi Stale".to_string()],
+        );
         children.insert(normalized(r"C:\Program Files (x86)"), vec!["Old App".to_string(), "Steam Like".to_string()]);
         children.insert(normalized(r"C:\Program Files (x86)\Old App"), vec!["bin".to_string()]);
+        children.insert(normalized(r"C:\Program Files\Msi Ghost"), vec!["lib".to_string()]);
+        children.insert(normalized(r"C:\Program Files\Msi Stale"), vec!["lib".to_string()]);
         children.insert(
             normalized(r"C:\ProgramData"),
             vec!["Config App".to_string(), "Ghost App".to_string(), "System App".to_string(), "Patch App".to_string()],
@@ -545,6 +589,10 @@ mod tests {
                 normalized(r"C:\Program Files"),
                 normalized(r"C:\Program Files\Live App"),
                 normalized(r"C:\Program Files\Gone App"),
+                normalized(r"C:\Program Files\Msi Ghost"),
+                normalized(r"C:\Program Files\Msi Ghost\lib"),
+                normalized(r"C:\Program Files\Msi Stale"),
+                normalized(r"C:\Program Files\Msi Stale\lib"),
                 normalized(r"C:\Program Files (x86)"),
                 normalized(r"C:\Program Files (x86)\Old App"),
                 normalized(r"C:\Program Files (x86)\Old App\bin"),
@@ -595,7 +643,7 @@ mod tests {
             assert_eq!(finding.bytes, 4096);
             assert!(finding.removable);
         }
-        assert_eq!(analysis.uninstall_keys, 11);
+        assert_eq!(analysis.uninstall_keys, 13);
     }
 
     /// A product whose recorded `InstallLocation` is gone and whose directory
@@ -625,6 +673,29 @@ mod tests {
         assert!(finding.evidence.ends_with(" days old"), "{finding:?}");
         assert!(!finding.safety.is_empty(), "{finding:?}");
         assert!(analysis.findings.iter().all(|finding| !(finding.kind == SoftwareKind::ConfigDirectory && finding.display_name == "Old App")));
+    }
+
+    /// A row registered with the Windows installer keeps its key while the
+    /// product is installed and loses it when the product is uninstalled, so its
+    /// file system state never establishes install residue. This holds both for
+    /// a row that records no install path and for one whose recorded path is
+    /// already gone: both directories exist, are stale, and have no executable
+    /// or process, yet neither becomes a candidate.
+    #[test]
+    fn installer_registered_rows_never_become_install_residue() {
+        let snapshot = parse_reg(REG_FIXTURE, "fixture.reg");
+        let fixture = fixture();
+        let analysis = fixture.analyze(&snapshot);
+
+        let paths: Vec<&str> = analysis.findings.iter().map(|finding| finding.path.as_str()).collect();
+        for name in ["Msi Ghost", "Msi Stale"] {
+            assert!(
+                analysis.skipped.iter().any(|skip| skip.reason == "still-installed" && skip.display_name.as_deref() == Some(name)),
+                "{name} {:#?}",
+                analysis.skipped
+            );
+            assert!(!paths.iter().any(|path| path.contains(name)), "{name} {paths:?}");
+        }
     }
 
     #[test]
@@ -733,6 +804,6 @@ mod tests {
         };
         let analysis = fixture.analyze(&snapshot);
         assert!(analysis.findings.is_empty(), "{:#?}", analysis.findings);
-        assert_eq!(analysis.uninstall_keys, 11);
+        assert_eq!(analysis.uninstall_keys, 13);
     }
 }
