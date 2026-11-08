@@ -180,11 +180,21 @@ pub struct DevArtifact {
     pub volume: Option<String>,
     /// The artifact lives on a different volume than its anchor/scan root.
     pub cross_volume: bool,
+    /// Whether a plan may select this artifact without an explicit per-path
+    /// choice. Level 2 caches are never preselected: rebuilding them means
+    /// downloading again.
+    #[serde(default = "preselected_by_default")]
+    pub default_selected: bool,
     /// What `bytes` was measured from, so `dev_clean` can reuse it when the
     /// directory has not changed in between.
     #[serde(default)]
     pub baseline: Option<DevSizeBaseline>,
     pub warnings: Vec<String>,
+}
+
+/// Older plan payloads predate the flag and always selected level-1 artifacts.
+fn preselected_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -832,6 +842,7 @@ impl Collector<'_> {
             project_root: Some(root.display().to_string()),
             volume,
             cross_volume,
+            default_selected: true,
             baseline: baseline_of(&stats),
             warnings,
         };
@@ -889,6 +900,7 @@ impl Collector<'_> {
                 project_root: None,
                 volume,
                 cross_volume,
+                default_selected: false,
                 baseline: baseline_of(&stats),
                 warnings,
             };
@@ -1363,7 +1375,17 @@ mod tests {
 
         let report = dev_scan_with(options.clone(), &dirs).unwrap();
         let registry = root.join("home").join(".cargo").join("registry").display().to_string();
-        assert!(report.artifacts.iter().any(|a| a.path == registry && a.level == 2), "{:?}", report.artifacts);
+        let artifact = report.artifacts.iter().find(|a| a.path == registry && a.level == 2).expect("cargo registry candidate");
+        assert!(!artifact.default_selected, "level-2 caches are never preselected: rebuilding downloads again");
+
+        // `.cargo` is protected by path, not as a whole directory: the registry
+        // cache is removable although credentials and config are not.
+        let plan = dev_plan_with(report.clone(), DeleteMode::Permanent, &dirs);
+        assert!(
+            plan.items.iter().any(|item| item.artifact.path == registry && item.removable),
+            "cargo registry must pass the protection gate: {:?}",
+            plan.items
+        );
 
         let without_anchor =
             DevScanOptions { roots: vec![root.join("home").display().to_string()], include_global: true, max_depth: None, limit: None };
@@ -1410,6 +1432,7 @@ mod tests {
             project_root: None,
             volume: None,
             cross_volume: false,
+            default_selected: true,
             baseline: None,
             warnings: Vec::new(),
         };

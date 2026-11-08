@@ -97,6 +97,8 @@ export type DevArtifact = {
     projectRoot?: string | null;
     volume?: string | null;
     crossVolume: boolean;
+    /** Level 2 caches are never preselected: rebuilding them downloads again. */
+    defaultSelected: boolean;
     baseline?: DevSizeBaseline | null;
     warnings: string[];
 };

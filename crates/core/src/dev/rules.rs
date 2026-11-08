@@ -156,12 +156,18 @@ pub const PROJECT_RULES: &[ProjectRule] = &[
 const SKIP_DESCEND: &[&str] =
     &[".git", "node_modules", "target", "dist", "build", ".next", ".turbo", ".venv", "venv", "vendor", ".gradle", "obj", "bin"];
 
-/// Names that can never become a candidate even if a rule is added later.
-const PROTECTED_NAMES: &[&str] = &[
-    ".git",
-    ".github",
-    ".cargo",
-    ".rustup",
+/// Directory names whose entire subtree is off limits: repository metadata,
+/// workflow configuration and the Rust toolchain root. These are identities,
+/// not caches, so a component match is the right granularity.
+const PROTECTED_TREES: &[&str] = &[".git", ".github", ".rustup"];
+
+/// Paths inside a Cargo home that hold credentials, configuration or the
+/// toolchain shims. `registry` and `git` are deliberately absent: they are
+/// rebuildable level-2 caches, so protecting all of `.cargo` would hide them.
+const PROTECTED_CARGO_PATHS: &[&str] = &["bin", "config", "config.toml", "credentials.toml"];
+
+/// Manifest and lockfile names that can never become a candidate, at any depth.
+const PROTECTED_FILES: &[&str] = &[
     "cargo.toml",
     "cargo.lock",
     "package.json",
@@ -193,15 +199,21 @@ pub fn should_skip_descend(name: &OsStr) -> bool {
 }
 
 /// Reject paths that must never be deleted: repositories, manifests,
-/// lockfiles, toolchains and SDK roots.
+/// lockfiles, toolchain roots, and Cargo's credentials/config/shim paths.
+/// Protection is path-granular: a cache inside `.cargo` is not protected just
+/// because it lives under that directory.
 pub fn is_protected(path: &Path) -> bool {
-    path.components().any(|component| match component {
-        Component::Normal(name) => {
-            let lower = name.to_string_lossy().to_ascii_lowercase();
-            lower == ".git" || lower == ".rustup" || PROTECTED_NAMES.contains(&lower.as_str())
-        }
-        _ => false,
-    })
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+    if components.iter().any(|name| PROTECTED_TREES.contains(&name.as_str()) || PROTECTED_FILES.contains(&name.as_str())) {
+        return true;
+    }
+    components.windows(2).any(|pair| pair[0] == ".cargo" && PROTECTED_CARGO_PATHS.contains(&pair[1].as_str()))
 }
 
 /// Components that mark a path as installed software rather than a user
@@ -437,6 +449,17 @@ mod tests {
         }
         assert!(is_protected(&root.join("source").join(".git").join("config")));
         assert!(!is_protected(&root.join("target")));
+
+        // Cargo protection is path-granular: credentials, config and shims stay
+        // protected, while the rebuildable registry and git caches do not.
+        let cargo = root.join("home").join(".cargo");
+        for name in ["bin", "config", "config.toml", "credentials.toml"] {
+            assert!(is_protected(&cargo.join(name)), ".cargo\\{name} should be protected");
+        }
+        assert!(is_protected(&cargo.join("bin").join("cargo.exe")));
+        assert!(!is_protected(&cargo.join("registry")));
+        assert!(!is_protected(&cargo.join("git")));
+        assert!(!is_protected(&cargo.join("registry").join("cache")));
 
         let _ = fs::remove_dir_all(&root);
     }

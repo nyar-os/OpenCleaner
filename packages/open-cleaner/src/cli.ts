@@ -203,8 +203,17 @@ cli.command('dev', 'cli.cmd.dev')
 
             for (const item of plan.items) {
                 const matches = matchesOnly(item.artifact.path);
-                const selected = item.removable && matches && (item.artifact.level === 1 || includeGlobal);
-                const state = item.removable ? (matches ? (selected ? 'SELECT' : 'level-2') : 'filtered') : `skip:${item.skipReason}`;
+                const chosen = only.length > 0 && matches;
+                const selected = item.removable && matches && (item.artifact.level === 1 || includeGlobal) && (item.artifact.defaultSelected || chosen);
+                const state = item.removable
+                    ? !matches
+                        ? 'filtered'
+                        : selected
+                            ? 'SELECT'
+                            : item.artifact.level === 2 && !includeGlobal
+                                ? 'level-2'
+                                : 'default-off'
+                    : `skip:${item.skipReason}`;
                 const owner = item.artifact.projectRoot ?? '-';
                 console.log(
                     `${formatBytes(item.artifact.bytes).padStart(10)}  L${item.artifact.level}  ${state.padEnd(18)}  ${item.artifact.ecosystem.padEnd(10)}  ${item.artifact.path}`,
@@ -213,9 +222,18 @@ cli.command('dev', 'cli.cmd.dev')
             }
             printProfile('plan', plan.profile);
 
-            const selected = plan.items.filter((item) => item.removable && matchesOnly(item.artifact.path) && (item.artifact.level === 1 || includeGlobal));
+            const selected = plan.items.filter(
+                (item) =>
+                    item.removable &&
+                    matchesOnly(item.artifact.path) &&
+                    (item.artifact.level === 1 || includeGlobal) &&
+                    (item.artifact.defaultSelected || only.length > 0),
+            );
             if (!includeGlobal && plan.items.some((item) => item.removable && item.artifact.level === 2)) {
                 console.log('level-2 global caches are not selected. Pass --include-global to include them: they can be rebuilt but must be downloaded again.');
+            }
+            if (includeGlobal && plan.items.some((item) => item.removable && item.artifact.level === 2 && !item.artifact.defaultSelected && matchesOnly(item.artifact.path))) {
+                console.log('level-2 caches stay unchecked by default: rebuilding them downloads again. Pass --only <name> to select one explicitly.');
             }
             if (!flag(options, 'yes')) {
                 console.log('dry run only. Re-run with --yes to delete the selected paths.');
