@@ -42,8 +42,6 @@ pub enum PathIssue {
     Duplicate,
     /// The expanded directory does not exist.
     Missing,
-    /// Already covered by an earlier parent directory in the same list.
-    Shadowed,
 }
 
 impl PathIssue {
@@ -53,7 +51,6 @@ impl PathIssue {
             Self::Unresolved => "unresolved",
             Self::Duplicate => "duplicate",
             Self::Missing => "missing",
-            Self::Shadowed => "shadowed",
         }
     }
 }
@@ -76,7 +73,7 @@ pub struct EnvPathEntry {
     pub removable: bool,
     /// PATH is high risk: nothing is selected by default.
     pub default_selected: bool,
-    /// Earlier entry this duplicate/shadowed issue refers to.
+    /// Earlier entry this duplicate issue refers to.
     pub related_index: Option<usize>,
 }
 
@@ -199,28 +196,7 @@ pub fn analyze(scope: PathScope, value: Option<&str>, ctx: &PathContext<'_>) -> 
                 default_selected: false,
                 related_index: None,
             });
-            seen.push(Seen { index, normalized, exists });
-            continue;
-        }
-
-        if let Some(parent) = seen.iter().find(|seen| seen.exists && is_parent(&seen.normalized, &normalized)) {
-            entries.push(EnvPathEntry {
-                scope,
-                key_path: key_path.clone(),
-                index,
-                raw,
-                expanded: Some(expanded),
-                issue: Some(PathIssue::Shadowed),
-                evidence: format!("already covered by the earlier parent entry #{} ({})", parent.index, parent.normalized),
-                safety: format!(
-                    "entry #{} is earlier in the list and already covers this directory, so removing the later entry cannot drop coverage",
-                    parent.index
-                ),
-                removable: true,
-                default_selected: false,
-                related_index: Some(parent.index),
-            });
-            seen.push(Seen { index, normalized, exists });
+            seen.push(Seen { index, normalized });
             continue;
         }
 
@@ -237,7 +213,7 @@ pub fn analyze(scope: PathScope, value: Option<&str>, ctx: &PathContext<'_>) -> 
             default_selected: false,
             related_index: None,
         });
-        seen.push(Seen { index, normalized, exists });
+        seen.push(Seen { index, normalized });
     }
 
     PathAnalysis { entries, warnings: Vec::new() }
@@ -246,7 +222,6 @@ pub fn analyze(scope: PathScope, value: Option<&str>, ctx: &PathContext<'_>) -> 
 struct Seen {
     index: usize,
     normalized: String,
-    exists: bool,
 }
 
 /// Windows path comparison: case-insensitive, `/` and `\` equivalent, trailing
@@ -264,17 +239,6 @@ pub(crate) fn normalize(path: &str) -> String {
         out.pop();
     }
     out
-}
-
-fn is_parent(parent: &str, child: &str) -> bool {
-    if parent.is_empty() {
-        return false;
-    }
-    let Some(rest) = child.strip_prefix(parent)
-    else {
-        return false;
-    };
-    !rest.is_empty() && (rest.starts_with('\\') || parent.ends_with('\\'))
 }
 
 #[cfg(test)]
@@ -309,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_missing_duplicate_shadowed_and_report_only_segments() {
+    fn classifies_missing_duplicate_and_report_only_segments() {
         let snapshot = parse_reg(REG_FIXTURE, "fixture.reg");
         let raw = snapshot.value(PathScope::User.key_path(), "Path").map(|value| value.data.clone());
         let dirs = existing();
@@ -326,9 +290,10 @@ mod tests {
         // Missing folder.
         assert_eq!(issue(3), Some(PathIssue::Missing));
         assert_eq!(issue(4), None);
-        // Child of the earlier `...\App\bin` entry.
-        assert_eq!(issue(5), Some(PathIssue::Shadowed));
-        assert_eq!(analysis.entries[5].related_index, Some(4));
+        // A child of an earlier entry is its own lookup directory: PATH is
+        // searched flat, so `...\App\bin` does not cover `...\App\bin\tools`.
+        assert_eq!(issue(5), None);
+        assert_eq!(analysis.entries[5].related_index, None);
         // Unknown variable is reported but never removable.
         assert_eq!(issue(6), Some(PathIssue::Unresolved));
         assert!(!analysis.entries[6].removable);
@@ -368,9 +333,9 @@ mod tests {
 
         assert_eq!(analysis.entries.len(), 2);
         assert_eq!(analysis.entries[0].issue, None);
-        // `C:\Windows\system32` sits under the earlier `C:\Windows` entry.
-        assert_eq!(analysis.entries[1].issue, Some(PathIssue::Shadowed));
-        assert_eq!(analysis.entries[1].related_index, Some(0));
+        // `C:\Windows\system32` is a separate lookup directory, not a redundant
+        // child of the earlier `C:\Windows` entry.
+        assert_eq!(analysis.entries[1].issue, None);
         assert_eq!(analysis.warnings.len(), 0);
     }
 
@@ -412,12 +377,12 @@ mod tests {
     }
 
     #[test]
-    fn drive_root_shadowing_is_computed_on_text_not_components() {
+    fn drive_root_does_not_shadow_its_children() {
         let dirs: BTreeSet<String> = [r"C:\", r"C:\Windows"].into_iter().map(normalize).collect();
         let dir_exists = exists_in(&dirs);
         let ctx = PathContext { dir_exists: &dir_exists, env: &no_env };
         let analysis = analyze(PathScope::User, Some(r"C:\;C:\Windows"), &ctx);
         assert_eq!(analysis.entries[0].issue, None);
-        assert_eq!(analysis.entries[1].issue, Some(PathIssue::Shadowed));
+        assert_eq!(analysis.entries[1].issue, None);
     }
 }

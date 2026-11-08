@@ -206,7 +206,7 @@ export type DevCleanReport = {
 
 export type PathScope = 'user' | 'machine';
 
-export type PathIssue = 'empty' | 'unresolved' | 'duplicate' | 'missing' | 'shadowed';
+export type PathIssue = 'empty' | 'unresolved' | 'duplicate' | 'missing';
 
 export type EnvPathEntry = {
     scope: PathScope;
