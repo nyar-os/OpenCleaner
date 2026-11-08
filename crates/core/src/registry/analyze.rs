@@ -236,7 +236,19 @@ pub fn resolve_executable(command: &str, ctx: &AnalyzeContext<'_>) -> Option<Str
         return None;
     }
     let candidate = if candidate.contains('%') { expand_env(candidate, ctx.env)? } else { candidate.to_string() };
-    absolute_target(&candidate)
+    let candidate = absolute_target(&candidate)?;
+    // The shell resolves an extension-less name through `PATHEXT`, so a missing
+    // file at that exact path proves nothing about the target.
+    has_extension(&candidate).then_some(candidate)
+}
+
+/// True when the last path segment carries a non-empty extension.
+fn has_extension(text: &str) -> bool {
+    let name = text.rsplit(['\\', '/']).next().unwrap_or(text);
+    match name.rsplit_once('.') {
+        Some((stem, extension)) => !stem.is_empty() && !extension.is_empty(),
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -413,6 +425,9 @@ mod tests {
         assert_eq!(resolve_executable(r"C:\Program Files\App\app.exe /run", &ctx).as_deref(), Some(r"C:\Program Files\App\app.exe"));
         assert_eq!(resolve_executable(r#"%ProgramFiles%\App\app.exe"#, &ctx).as_deref(), Some(r"C:\Program Files\App\app.exe"));
         assert_eq!(resolve_executable(r#"%UNKNOWN%\app.exe"#, &ctx), None);
+        // A full path without an extension is resolved through `PATHEXT`, so it
+        // is not a checkable target either.
+        assert_eq!(resolve_executable(r"C:\Tools\perfmon", &ctx), None);
         assert_eq!(expand_env(r#"%UNKNOWN%\x"#, &env), None);
     }
 
