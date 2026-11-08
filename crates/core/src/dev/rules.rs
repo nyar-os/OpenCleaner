@@ -204,6 +204,32 @@ pub fn is_protected(path: &Path) -> bool {
     })
 }
 
+/// Components that mark a path as installed software rather than a user
+/// project. Programs ship their own `node_modules` and `dist`, and editor
+/// extensions use the same layout, so a manifest anchor found there describes a
+/// product the user cannot rebuild.
+const INSTALL_COMPONENTS: &[&str] = &["program files", "program files (x86)", "programdata", "windows", "extensions"];
+
+/// True when a path belongs to an installed program, an editor extension or a
+/// per-user program directory. Such a tree is never a dev candidate.
+pub fn is_installed_program_path(path: &Path) -> bool {
+    let protected = path.components().any(|component| match component {
+        Component::Normal(name) => {
+            let lower = name.to_string_lossy().to_ascii_lowercase();
+            INSTALL_COMPONENTS.contains(&lower.as_str())
+        }
+        _ => false,
+    });
+    if protected {
+        return true;
+    }
+    let Some(programs) = std::env::var_os("LOCALAPPDATA").map(|value| PathBuf::from(value).join("Programs"))
+    else {
+        return false;
+    };
+    crate::safety::is_within(&programs, path)
+}
+
 /// Detect manifests in one directory. Order is stable so report output is
 /// deterministic.
 pub fn detect_manifests(dir: &Path) -> Vec<ManifestKind> {
@@ -366,6 +392,15 @@ mod tests {
         assert!(resolve_project_artifact(&root.join("vendor")).is_none());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn installed_programs_and_editor_extensions_are_not_projects() {
+        assert!(is_installed_program_path(Path::new(r"C:\Program Files\Vendor\Product\resources\app\node_modules")));
+        assert!(is_installed_program_path(Path::new(r"C:\Program Files (x86)\Vendor\Product\resources\app\node_modules")));
+        assert!(is_installed_program_path(Path::new(r"C:\ProgramData\Vendor\Product\dist")));
+        assert!(is_installed_program_path(Path::new(r"C:\Users\me\.editor\extensions\publisher.name-1.0.0\dist")));
+        assert!(!is_installed_program_path(Path::new(r"C:\work\project\dist")));
     }
 
     #[test]

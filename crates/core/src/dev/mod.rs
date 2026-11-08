@@ -742,6 +742,12 @@ impl Collector<'_> {
         }
 
         if !manifests.is_empty() {
+            // A manifest inside an installed program or an editor extension
+            // belongs to a shipped product, so neither its artifacts nor its
+            // children are user-rebuildable projects.
+            if rules::is_installed_program_path(dir) {
+                return;
+            }
             self.scanned_projects += 1;
             for manifest in &manifests {
                 self.anchors.insert(*manifest);
@@ -928,7 +934,7 @@ fn resolve_roots(input: &[String]) -> Result<Vec<PathBuf>> {
 /// always a directory. Cheap enough to run for every item right before the
 /// probe.
 fn gate_path(path: &Path, dirs: &BaseDirs) -> Option<SkipReason> {
-    if rules::is_protected(path) || is_base_dir(path, dirs) {
+    if rules::is_protected(path) || is_base_dir(path, dirs) || rules::is_installed_program_path(path) {
         return Some(SkipReason::ProtectedPath);
     }
     let Ok(meta) = fs::symlink_metadata(path)
