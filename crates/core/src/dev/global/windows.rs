@@ -21,6 +21,7 @@ pub(super) fn specs(dirs: &BaseDirs, env: impl Fn(&str) -> Option<String>) -> Ve
     if let Some(local) = &dirs.local_app_data {
         push(&mut specs, local.join("npm-cache"), Ecosystem::Npm, ManifestKind::PackageJson, "package.json → npm cache");
         push(&mut specs, local.join("pnpm").join("store"), Ecosystem::Pnpm, ManifestKind::PnpmLock, "pnpm-lock.yaml → pnpm store");
+        push(&mut specs, local.join("pnpm-cache"), Ecosystem::Pnpm, ManifestKind::PnpmLock, "pnpm-lock.yaml → pnpm cache");
         push(&mut specs, local.join("Yarn").join("Cache"), Ecosystem::Yarn, ManifestKind::YarnLock, "yarn.lock → yarn cache");
         push(&mut specs, local.join("pip").join("Cache"), Ecosystem::Python, ManifestKind::PyProject, "pyproject.toml → pip cache");
         push(&mut specs, local.join("uv").join("cache"), Ecosystem::Python, ManifestKind::PyProject, "pyproject.toml → uv cache");

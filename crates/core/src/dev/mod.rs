@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Error, Result,
     locations::{BaseDirs, base_dirs},
-    platform,
+    platform, safety,
 };
 
 use self::rules::{Ecosystem, ManifestKind, ProjectRule};
@@ -627,6 +627,7 @@ impl PeakSample {
 fn dev_scan_with(options: DevScanOptions, dirs: &BaseDirs) -> Result<DevScanReport> {
     let roots = resolve_roots(&options.roots)?;
     let max_depth = options.max_depth.unwrap_or(5).max(1);
+    let cache_roots: Vec<PathBuf> = global::specs(dirs).into_iter().map(|spec| spec.path).collect();
 
     let mut collector = Collector {
         artifacts: BTreeMap::new(),
@@ -634,6 +635,7 @@ fn dev_scan_with(options: DevScanOptions, dirs: &BaseDirs) -> Result<DevScanRepo
         scanned_projects: 0,
         warnings: Vec::new(),
         dirs,
+        cache_roots: &cache_roots,
         root_volume: roots.first().and_then(|root| platform::volume_of(root)),
         profile: profiling_enabled().then(ScanProfile::default),
     };
@@ -689,6 +691,9 @@ struct Collector<'a> {
     scanned_projects: usize,
     warnings: Vec<String>,
     dirs: &'a BaseDirs,
+    /// Package-manager cache roots. Their content is a global cache, never a
+    /// rebuildable project of the user's, so the project walk never enters them.
+    cache_roots: &'a [PathBuf],
     root_volume: Option<String>,
     profile: Option<ScanProfile>,
 }
@@ -699,6 +704,9 @@ impl Collector<'_> {
     /// may be an artifact. Source files that are not manifests are never
     /// stat'ed.
     fn walk(&mut self, dir: &Path, depth: usize, max_depth: usize) {
+        if self.cache_roots.iter().any(|cache| safety::is_within(cache, dir)) {
+            return;
+        }
         let started = self.profile.as_ref().map(|_| Instant::now());
         let mut manifests = BTreeSet::new();
         let mut children: Vec<PathBuf> = Vec::new();
@@ -1309,6 +1317,36 @@ mod tests {
 
         let modules = root.join("extensions").join("my-extension").join("node_modules").display().to_string();
         assert!(report.artifacts.iter().any(|artifact| artifact.path == modules), "{:?}", report.artifacts);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Package-manager cache content is a global cache, not a project. A
+    /// `package.json` inside it must never become a level-1 candidate, and the
+    /// walk must not descend into the cache at all.
+    #[test]
+    fn package_manager_cache_content_is_never_a_level_one_project() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("cache-tree");
+        let pnpm_cache = root.join("local").join("pnpm-cache").join("dlx").join("1a1b");
+        touch(&pnpm_cache.join("package.json"), 16);
+        touch(&pnpm_cache.join("node_modules").join("dep").join("index.js"), 2048);
+        let store = root.join("local").join("pnpm").join("store").join("v10").join("files").join("ab");
+        touch(&store.join("package.json"), 16);
+        touch(&store.join("dist").join("index.js"), 2048);
+        touch(&root.join("project").join("package.json"), 16);
+        touch(&root.join("project").join("node_modules").join("dep").join("index.js"), 1024);
+
+        let report = dev_scan_with(
+            DevScanOptions { roots: vec![root.display().to_string()], include_global: false, max_depth: None, limit: None },
+            &base(&root),
+        )
+        .unwrap();
+
+        let modules = root.join("project").join("node_modules").display().to_string();
+        assert!(report.artifacts.iter().any(|artifact| artifact.path == modules), "{:?}", report.artifacts);
+        assert!(report.artifacts.iter().all(|artifact| !artifact.path.contains("pnpm-cache")), "{:?}", report.artifacts);
+        assert!(report.artifacts.iter().all(|artifact| !artifact.path.contains("store")), "{:?}", report.artifacts);
 
         let _ = fs::remove_dir_all(&root);
     }
