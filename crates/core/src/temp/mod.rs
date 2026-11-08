@@ -194,7 +194,11 @@ struct DirState {
     project_root: bool,
 }
 
-fn inspect_dir(dir: &Path, cutoff_ms: u64) -> DirState {
+/// Directory activity uses the same age cutoff as the files themselves: only
+/// content newer than the caller's threshold makes a directory active. A fixed
+/// window would both keep a 60-day file protected by a 10-day sibling and hide
+/// an old file behind content the caller already considers stale.
+fn inspect_dir(dir: &Path, cutoff_ms: u64, threshold_ms: u64) -> DirState {
     let mut state = DirState::default();
     let Ok(read) = std::fs::read_dir(dir)
     else {
@@ -210,7 +214,7 @@ fn inspect_dir(dir: &Path, cutoff_ms: u64) -> DirState {
             break;
         }
     }
-    state.newest_entry_recent = safety::newest_entry_unix_ms(dir).map(|stamp| safety::is_fresh(stamp, cutoff_ms)).unwrap_or(false);
+    state.newest_entry_recent = safety::newest_entry_unix_ms(dir).map(|stamp| stamp.saturating_add(threshold_ms) > cutoff_ms).unwrap_or(false);
     state
 }
 
@@ -267,7 +271,7 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
     let mut stack = vec![(root.to_path_buf(), false)];
     while let Some((dir, dir_recent)) = stack.pop() {
         let is_root = safety::path_key(&dir) == safety::path_key(root);
-        let state = if is_root { DirState::default() } else { inspect_dir(&dir, cutoff_ms) };
+        let state = if is_root { DirState::default() } else { inspect_dir(&dir, cutoff_ms, threshold_ms) };
         if state.project_root {
             output.skipped.dev_root += 1;
             continue;
@@ -639,6 +643,28 @@ mod tests {
         let report =
             temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
         assert_eq!(report.candidate_files, 0);
+        assert_eq!(report.skipped.dir_recent, 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Directory activity uses the caller's cutoff, not a fixed window. In
+    /// `mixed`, the 10-day sibling is itself past the 7-day cutoff, so it does
+    /// not protect the 60-day file; in `active`, a 3-day write does.
+    #[test]
+    fn directory_activity_uses_the_same_age_cutoff_as_files() {
+        let root = unique_root("temp-dir-threshold");
+        write_file(&root.join("mixed").join("ten-days.log"), 512, 10);
+        write_file(&root.join("mixed").join("sixty-days.bin"), 1024, 60);
+        write_file(&root.join("active").join("three-days.log"), 512, 3);
+        write_file(&root.join("active").join("sixty-days.bin"), 1024, 60);
+        let report =
+            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        let candidates: Vec<&str> = report.samples.iter().map(|sample| sample.path.as_str()).collect();
+        assert_eq!(report.candidate_files, 2, "{candidates:?}");
+        assert!(candidates.iter().any(|path| path.contains("mixed") && path.ends_with("ten-days.log")), "{candidates:?}");
+        assert!(candidates.iter().any(|path| path.contains("mixed") && path.ends_with("sixty-days.bin")), "{candidates:?}");
+        assert!(candidates.iter().all(|path| !path.contains("active")), "{candidates:?}");
+        assert_eq!(report.skipped.recent, 1);
         assert_eq!(report.skipped.dir_recent, 1);
         std::fs::remove_dir_all(&root).ok();
     }
