@@ -1,0 +1,312 @@
+<template>
+    <section class="oc-board" data-open-cleaner-board="true">
+        <header class="oc-board__head">
+            <h2 class="oc-board__title">
+                {{ title }}
+            </h2>
+            <p class="oc-board__meta">
+                {{ meta }}
+            </p>
+        </header>
+        <div class="oc-board__legend">
+            <span v-for="entry in legend" :key="entry.id" class="oc-board__legend-item">
+                <span class="oc-board__swatch" :data-kind="entry.id"></span>
+                <span>{{ entry.label }}</span>
+            </span>
+        </div>
+        <div class="oc-board__rows" role="tree" aria-label="Disk usage by path">
+            <button
+                v-for="row in rows"
+                :key="row.id"
+                type="button"
+                role="treeitem"
+                :class="rowClass(row)"
+                :style="rowStyle(row)"
+                :data-kind="row.kind"
+                :data-depth="row.depth"
+                :data-selected="row.id === selectedId ? 'true' : 'false'"
+                :aria-selected="row.id === selectedId ? 'true' : 'false'"
+                :title="row.path"
+                @click="pick(row.id)"
+            >
+                <span class="oc-board__label">{{ row.label }}</span>
+                <span class="oc-board__bar">
+                    <span class="oc-board__fill" :style="separatorStyle(row)"></span>
+                </span>
+                <span class="oc-board__size">{{ sizeText(row) }}</span>
+                <span class="oc-board__share">{{ shareText(row) }}</span>
+            </button>
+        </div>
+        <p v-if="note" class="oc-board__note">
+            {{ note }}
+        </p>
+    </section>
+</template>
+
+<style>
+.oc-board {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    background: var(--vmz-surface-paper);
+}
+
+.oc-board__head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.625rem 0.875rem 0.375rem;
+    border-bottom: 1px solid var(--vmz-line-subtle);
+}
+
+.oc-board__title {
+    margin: 0;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--vmz-text-ink);
+}
+
+.oc-board__meta {
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--vmz-text-tertiary);
+    font-variant-numeric: tabular-nums;
+}
+
+.oc-board__legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.875rem;
+    padding: 0.375rem 0.875rem;
+    border-bottom: 1px solid var(--vmz-line-subtle);
+    font-size: 0.6875rem;
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-board__legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+}
+
+.oc-board__swatch {
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: 2px;
+    background: var(--vmz-line-strong);
+}
+
+.oc-board__swatch[data-kind="cache"] {
+    background: var(--vmz-status-info-accent);
+}
+
+.oc-board__swatch[data-kind="temp"] {
+    background: var(--vmz-status-warning-accent);
+}
+
+.oc-board__swatch[data-kind="log"] {
+    background: var(--vmz-status-danger-accent);
+}
+
+.oc-board__swatch[data-kind="dir"] {
+    background: var(--vmz-text-tertiary);
+}
+
+.oc-board__rows {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 0.25rem 0;
+}
+
+.oc-board__row {
+    display: grid;
+    grid-template-columns: minmax(8rem, 1fr) minmax(4rem, 2.2fr) 5.25rem 3.25rem;
+    align-items: center;
+    gap: 0.625rem;
+    width: 100%;
+    min-height: 28px;
+    margin: 0;
+    border: 0;
+    border-left: 2px solid transparent;
+    background: transparent;
+    color: var(--vmz-text-ink);
+    font-family: var(--vmz-font-sans);
+    font-size: 0.75rem;
+    text-align: left;
+    cursor: pointer;
+}
+
+.oc-board__row:hover {
+    background: var(--vmz-action-secondary-hover);
+}
+
+.oc-board__row:focus-visible {
+    outline: 2px solid var(--vmz-focus-ring);
+    outline-offset: -2px;
+}
+
+.oc-board__row[data-selected="true"] {
+    border-left-color: var(--vmz-action-primary-background);
+    background: var(--vmz-action-primary-soft);
+}
+
+.oc-board__row.is-dir {
+    color: var(--vmz-text-ink);
+    font-weight: 500;
+}
+
+.oc-board__label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.oc-board__bar {
+    display: block;
+    height: 8px;
+    border-radius: 2px;
+    background: var(--vmz-surface-fill);
+    overflow: hidden;
+}
+
+.oc-board__fill {
+    display: block;
+    height: 100%;
+    min-width: 2px;
+    border-radius: 2px;
+    background: var(--vmz-line-strong);
+}
+
+.oc-board__row[data-kind="cache"] .oc-board__fill {
+    background: var(--vmz-status-info-accent);
+}
+
+.oc-board__row[data-kind="temp"] .oc-board__fill {
+    background: var(--vmz-status-warning-accent);
+}
+
+.oc-board__row[data-kind="log"] .oc-board__fill {
+    background: var(--vmz-status-danger-accent);
+}
+
+.oc-board__row[data-kind="part"] .oc-board__fill {
+    background: var(--vmz-text-tertiary);
+}
+
+.oc-board__size,
+.oc-board__share {
+    font-family: var(--vmz-font-mono);
+    font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--vmz-text-tertiary);
+    text-align: right;
+}
+
+.oc-board__row[data-selected="true"] .oc-board__size,
+.oc-board__row[data-selected="true"] .oc-board__share {
+    color: var(--vmz-text-ink);
+}
+
+.oc-board__note {
+    margin: 0;
+    padding: 0.375rem 0.875rem 0.5rem;
+    border-top: 1px solid var(--vmz-line-subtle);
+    font-size: 0.6875rem;
+    line-height: 1.5;
+    color: var(--vmz-text-muted);
+}
+</style>
+
+<script client>
+/**
+ * OpenCleaner disk board — the single chart assembly point.
+ *
+ * This component owns the board configuration (`spec`) and the only rendering
+ * of the scanned hierarchy. Today it draws an indented volume list so the
+ * workbench stays usable while `@vmz/ui-charts` and `@doki-land/davinci` are
+ * unpublished. When the treemap package ships, replace the `<div class="oc-board__rows">`
+ * body with `<Chart :spec="spec" :rows="rows">`; keep the `rows` contract below
+ * unchanged so the page never learns geometry, ordering or palette rules.
+ */
+export default class DiskBoard {
+    /** Hierarchy rows shaped by the page: `{ id, parent, path, label, depth, kind, bytes }`. */
+    public rows: {
+        id: string;
+        parent: string | null;
+        path: string;
+        label: string;
+        depth: number;
+        kind: string;
+        bytes: number;
+    }[] = [];
+    public title: string = "Disk usage";
+    public meta: string = "";
+    public note: string = "";
+    public totalBytes: number = 0;
+    public selectedId: string = "";
+    public onPick: ((id: string) => void) | null = null;
+    /** Board configuration; mirrors the upstream treemap options that will consume it. */
+    public spec = {
+        mark: "treemap",
+        keyField: "id",
+        parentField: "parent",
+        sizeField: "bytes",
+        colorField: "kind",
+        depth: 3,
+        minArea: 18,
+    };
+    public legend = [
+        { id: "dir", label: "Directory" },
+        { id: "cache", label: "Cache" },
+        { id: "temp", label: "Temp" },
+        { id: "log", label: "Log" },
+        { id: "file", label: "File" },
+    ];
+
+    rowClass(row) {
+        const parts = ["oc-board__row"];
+        if (row.kind === "dir") parts.push("is-dir");
+        return parts.join(" ");
+    }
+
+    rowStyle(row) {
+        const depth = row.depth > 0 ? row.depth : 0;
+        return "padding-left:" + (8 + depth * 16) + "px;padding-right:12px;";
+    }
+
+    separatorStyle(row) {
+        const share = this.totalBytes > 0 ? (row.bytes / this.totalBytes) * 100 : 0;
+        return "width:" + Math.max(1, share) + "%";
+    }
+
+    sizeText(row) {
+        return this.formatBytes(row.bytes);
+    }
+
+    formatBytes(bytes) {
+        const value = Number(bytes) || 0;
+        if (value < 1024) return value + " B";
+        const units = ["KB", "MB", "GB", "TB"];
+        let scaled = value / 1024;
+        let index = 0;
+        while (scaled >= 1024 && index < units.length - 1) {
+            scaled /= 1024;
+            index += 1;
+        }
+        return (scaled >= 100 ? scaled.toFixed(0) : scaled.toFixed(1)) + " " + units[index];
+    }
+
+    shareText(row) {
+        if (this.totalBytes <= 0) return "";
+        const share = (row.bytes / this.totalBytes) * 100;
+        return (share >= 0.1 ? share.toFixed(1) : "<0.1") + "%";
+    }
+
+    pick(id) {
+        if (typeof this.onPick === "function") this.onPick(id);
+    }
+}
+</script>

@@ -1,942 +1,1971 @@
 <template>
-    <div data-open-cleaner="root" class="oc-root" data-theme="dark">
-        <AppShell brand="Open Cleaner" homeHref="/" navLabel="Navigation" activeId="scan" :nav="navItems">
-            <div class="vmz-slot-content oc-body">
-                <header class="oc-head">
-                    <h1>
-                        {{ title }}
-                    </h1>
-                    <p>
-                        {{ lead }}
-                    </p>
-                </header>
-                <Card :title="sessionCardTitle" :description="sessionCardDesc">
-                    <div class="oc-modes">
-                        <Button type="button" :variant="scanModeVariant" :disabled="busy" @click="setModeScan">
-                            Scan
-                        </Button>
-                        <Button type="button" :variant="tempModeVariant" :disabled="busy" @click="setModeTemp">
-                            Temp files
-                        </Button>
-                        <Button type="button" :variant="rootsModeVariant" :disabled="busy" @click="setModeRoots">
-                            Build roots
-                        </Button>
-                    </div>
-                    <div class="oc-bar">
-                        <div class="oc-bar__item">
-                            <span class="oc-bar__key">Root</span>
-                            <span class="oc-bar__value">{{ rootText }}</span>
-                        </div>
-                        <div class="oc-bar__item">
-                            <span class="oc-bar__key">Rule set</span>
-                            <span class="oc-bar__value">{{ ruleSetText }}</span>
-                        </div>
-                        <div class="oc-bar__item">
-                            <span class="oc-bar__key">Threshold</span>
-                            <span class="oc-bar__value">{{ thresholdText }}</span>
-                        </div>
-                    </div>
-                    <Field
-                        v-if="showScan || showTemp"
-                        :label="rootLabel"
-                        :description="rootDesc"
-                        controlId="oc-root"
-                        descriptionId="oc-root-desc"
-                        errorId="oc-root-err"
-                        describedBy="oc-root-desc"
-                        :value="root"
-                        :placeholder="rootPlaceholder"
-                        @input="onRootInput"
-                    />
-                    <Field
-                        v-if="showTemp"
-                        :label="thresholdLabel"
-                        :description="thresholdDesc"
-                        controlId="oc-threshold"
-                        descriptionId="oc-threshold-desc"
-                        errorId="oc-threshold-err"
-                        describedBy="oc-threshold-desc"
-                        :value="olderThanDaysText"
-                        :placeholder="thresholdPlaceholder"
-                        @input="onThresholdInput"
-                    />
-                    <div class="oc-actions">
-                        <Button v-if="showScan" type="button" :loading="busy" :disabled="busy" @click="runScan">
-                            {{ scanLabel }}
-                        </Button>
-                        <Button v-if="showTemp" type="button" :loading="busy" :disabled="busy" @click="planTemp">
-                            {{ planTempLabel }}
-                        </Button>
-                        <Button
-                            v-if="showTemp"
-                            type="button"
-                            variant="danger"
-                            :disabled="tempExecuteDisabled"
-                            @click="cleanTemp"
-                        >
-                            {{ cleanTempLabel }}
-                        </Button>
-                        <Button v-if="showRoots" type="button" :loading="busy" :disabled="busy" @click="planBuildRoots">
-                            {{ planRootsLabel }}
-                        </Button>
-                        <Button
-                            v-if="showRoots"
-                            type="button"
-                            variant="danger"
-                            :disabled="rootsExecuteDisabled"
-                            @click="cleanBuildRoots"
-                        >
-                            {{ cleanRootsLabel }}
-                        </Button>
-                        <Button type="button" variant="secondary" @click="requestClose">
-                            {{ closeLabel }}
-                        </Button>
-                    </div>
-                    <Alert v-if="error" tone="danger" roleName="alert" :title="errorTitle" :description="error" />
-                    <Alert v-else-if="status" tone="info" roleName="status" :title="statusTitle" :description="status" />
-                </Card>
-
-                <Card v-if="showScan" :title="scanCardTitle" :description="scanCardDesc">
-                    <div class="oc-stats">
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                {{ totalLabel }}
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ totalText }}
-                            </div>
-                        </div>
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                {{ countLabel }}
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ countText }}
-                            </div>
-                        </div>
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                {{ scannedRootLabel }}
-                            </div>
-                            <div class="oc-stat__value oc-stat__value--path">
-                                {{ scannedRoot }}
-                            </div>
-                        </div>
-                    </div>
-                    <Empty v-if="!rows.length && !busy" :title="emptyTitle" :description="emptyDesc" />
-                    <Table
-                        v-else
-                        :columns="columns"
-                        :rows="rows"
-                        :loading="busy"
-                        :loadingLabel="loadingLabel"
-                        :loadingText="loadingText"
-                        :hasRowAction="false"
-                        :sortKey="sortKey"
-                        :sortDir="sortDir"
-                        :onSort="sortBy"
-                    />
-                </Card>
-
-                <Card v-if="showTemp && tempPlanExists" :title="tempPlanTitle" :description="tempPlanDesc">
-                    <div class="oc-stats">
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Candidates
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ tempCandidatesText }}
-                            </div>
-                        </div>
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Scanned
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ tempScannedText }}
-                            </div>
-                        </div>
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Root
-                            </div>
-                            <div class="oc-stat__value oc-stat__value--path">
-                                {{ tempRootText }}
-                            </div>
-                        </div>
-                    </div>
-                    <Alert v-if="tempWarnings" tone="warning" roleName="status" title="Plan warnings" :description="tempWarnings" />
-                    <h3 class="oc-subhead">
-                        Age distribution
-                    </h3>
-                    <Table :columns="countColumns" :rows="ageRows" :hasRowAction="false" />
-                    <h3 class="oc-subhead">
-                        Extension distribution
-                    </h3>
-                    <Table :columns="countColumns" :rows="extRows" :hasRowAction="false" />
-                    <h3 class="oc-subhead">
-                        Skipped
-                    </h3>
-                    <Table :columns="skipColumns" :rows="skipRows" :hasRowAction="false" />
-                    <p class="oc-note">
-                        {{ tempProbeText }}
-                    </p>
-                    <h3 class="oc-subhead">
-                        Largest candidates
-                    </h3>
-                    <Table :columns="sampleColumns" :rows="sampleRows" :hasRowAction="false" />
-                    <p class="oc-note">
-                        {{ tempSamplesNote }}
-                    </p>
-                </Card>
-
-                <Card v-if="showTemp && tempResultExists" :title="tempResultTitle" :description="tempResultDesc">
-                    <div class="oc-stats">
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Deleted
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ tempDeletedText }}
-                            </div>
-                        </div>
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Freed
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ tempFreedText }}
-                            </div>
-                        </div>
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Skipped
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ tempSkippedText }}
-                            </div>
-                        </div>
-                    </div>
-                    <Alert v-if="tempResultWarnings" tone="warning" roleName="status" title="Execution warnings" :description="tempResultWarnings" />
-                    <Table :columns="itemColumns" :rows="tempItemRows" :hasRowAction="false" />
-                    <p class="oc-note">
-                        {{ tempItemNote }}
-                    </p>
-                </Card>
-
-                <Card v-if="showRoots && rootsPlanExists" :title="rootsPlanTitle" :description="rootsPlanDesc">
-                    <div class="oc-stats">
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Config
-                            </div>
-                            <div class="oc-stat__value oc-stat__value--path">
-                                {{ rootsConfigText }}
-                            </div>
-                        </div>
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Declared
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ rootsDeclaredText }}
-                            </div>
-                        </div>
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Removable
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ rootsRemovableText }}
-                            </div>
-                        </div>
-                    </div>
-                    <Alert v-if="rootsWarnings" tone="warning" roleName="status" title="Plan warnings" :description="rootsWarnings" />
-                    <Table :columns="rootsColumns" :rows="rootsRows" :hasRowAction="false" />
-                </Card>
-
-                <Card v-if="showRoots && rootsResultExists" :title="rootsResultTitle" :description="rootsResultDesc">
-                    <div class="oc-stats">
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Deleted directories
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ rootsDeletedText }}
-                            </div>
-                        </div>
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Freed
-                            </div>
-                            <div class="oc-stat__value">
-                                {{ rootsFreedText }}
-                            </div>
-                        </div>
-                        <div class="oc-stat">
-                            <div class="oc-stat__label">
-                                Config
-                            </div>
-                            <div class="oc-stat__value oc-stat__value--path">
-                                {{ rootsResultConfigText }}
-                            </div>
-                        </div>
-                    </div>
-                    <Alert v-if="rootsResultWarnings" tone="warning" roleName="status" title="Execution warnings" :description="rootsResultWarnings" />
-                    <Table :columns="rootItemColumns" :rows="rootsItemRows" :hasRowAction="false" />
-                </Card>
+    <div data-open-cleaner="root" class="oc-root" :data-theme="themeValue">
+        <header class="oc-header">
+            <span class="oc-header__brand">Open Cleaner</span>
+            <label class="oc-scope" for="oc-root">
+                <span class="oc-scope__key">Scope</span>
+                <input
+                    id="oc-root"
+                    class="oc-scope__input"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    :value="root"
+                    :placeholder="rootPlaceholder"
+                    :disabled="busy"
+                    @input="onRootInput"
+                    @keydown="onRootKey"
+                />
+            </label>
+            <select
+                class="oc-header__domain"
+                :value="domain"
+                aria-label="Cleanup domain"
+                :disabled="busy"
+                @change="onDomainChange"
+            >
+                <option v-for="item in domains" :key="item.id" :value="item.id">
+                    {{ item.label }}
+                </option>
+            </select>
+            <div class="oc-header__actions">
+                <button type="button" class="oc-btn oc-btn--primary" :disabled="busy" @click="runScan">
+                    {{ scanLabel }}
+                </button>
             </div>
-        </AppShell>
+        </header>
+
+        <div class="oc-main">
+            <nav class="oc-domains" aria-label="Cleanup domains">
+                <span class="oc-domains__title">Cleanup domains</span>
+                <button
+                    v-for="item in domains"
+                    :key="item.id"
+                    type="button"
+                    :class="domainClass(item.id)"
+                    :data-domain="item.id"
+                    :aria-current="item.id === domain ? 'true' : 'false'"
+                    :disabled="busy"
+                    @click="pickDomain(item.id)"
+                >
+                    <span class="oc-domains__label">{{ item.label }}</span>
+                    <span class="oc-domains__hint">{{ item.hint }}</span>
+                </button>
+            </nav>
+
+            <section class="oc-work" aria-label="Candidates">
+                <div class="oc-work__bar">
+                    <div class="oc-work__heading">
+                        <h1 class="oc-work__title">
+                            {{ domainTitle }}
+                        </h1>
+                        <span class="oc-work__meta">{{ domainMeta }}</span>
+                    </div>
+                    <input
+                        v-if="filterVisible"
+                        class="oc-filter"
+                        type="search"
+                        :value="filter"
+                        placeholder="Filter by path"
+                        aria-label="Filter candidates"
+                        @input="onFilterInput"
+                    />
+                    <button
+                        type="button"
+                        class="oc-btn"
+                        :aria-expanded="inspectorAttr"
+                        data-role="inspector-toggle"
+                        @click="toggleInspector"
+                    >
+                        {{ inspectorLabel }}
+                    </button>
+                </div>
+
+                <div v-if="busy" class="oc-state">
+                    <span class="oc-spinner" aria-hidden="true"></span>
+                    <p class="oc-state__text">
+                        {{ statusText }}
+                    </p>
+                </div>
+
+                <div v-else-if="errorText" class="oc-state oc-state--error" role="alert">
+                    <p class="oc-state__title">
+                        {{ errorTitle }}
+                    </p>
+                    <p class="oc-state__text">
+                        {{ errorText }}
+                    </p>
+                    <button type="button" class="oc-btn" @click="runScan">
+                        Retry
+                    </button>
+                </div>
+
+                <div v-else-if="planOpen" class="oc-plan">
+                    <div class="oc-plan__head">
+                        <h2 class="oc-plan__title">
+                            {{ planTitle }}
+                        </h2>
+                        <p class="oc-plan__meta">
+                            {{ planMeta }}
+                        </p>
+                    </div>
+                    <ul class="oc-plan__list">
+                        <li v-for="row in planRows" :key="row.id" class="oc-plan__row" :data-tone="row.tone">
+                            <span class="oc-plan__key">{{ row.key }}</span>
+                            <span class="oc-plan__value">{{ row.value }}</span>
+                        </li>
+                    </ul>
+                    <p v-if="planWarning" class="oc-plan__warning">
+                        {{ planWarning }}
+                    </p>
+                    <div class="oc-plan__actions">
+                        <button type="button" class="oc-btn" @click="closePlan">
+                            Back to candidates
+                        </button>
+                    </div>
+                </div>
+
+                <div v-else-if="resultsOpen" class="oc-plan">
+                    <div class="oc-plan__head">
+                        <h2 class="oc-plan__title">
+                            {{ resultTitle }}
+                        </h2>
+                        <p class="oc-plan__meta">
+                            {{ resultMeta }}
+                        </p>
+                    </div>
+                    <ul class="oc-plan__list">
+                        <li v-for="row in resultRows" :key="row.id" class="oc-plan__row" :data-tone="row.tone">
+                            <span class="oc-plan__key">{{ row.key }}</span>
+                            <span class="oc-plan__value">{{ row.value }}</span>
+                        </li>
+                    </ul>
+                    <div class="oc-plan__actions">
+                        <button type="button" class="oc-btn" @click="closeResults">
+                            Back to candidates
+                        </button>
+                    </div>
+                </div>
+
+                <DiskBoard
+                    v-else-if="domain === 'disk'"
+                    :rows="boardRows"
+                    :title="boardTitle"
+                    :meta="boardMeta"
+                    :note="boardNote"
+                    :totalBytes="boardTotal"
+                    :selectedId="focusedId"
+                    :onPick="focusNode"
+                />
+
+                <div v-else-if="rows.length" class="oc-table">
+                    <div class="oc-table__head" role="row">
+                        <span class="oc-table__cell oc-table__cell--check" aria-hidden="true"></span>
+                        <button type="button" class="oc-table__cell oc-table__cell--name" @click="sortBy('name')">
+                            Name
+                        </button>
+                        <span class="oc-table__cell oc-table__cell--path">Path</span>
+                        <button type="button" class="oc-table__cell oc-table__cell--bytes" @click="sortBy('bytes')">
+                            Size
+                        </button>
+                        <span class="oc-table__cell oc-table__cell--reason">Reason</span>
+                        <span class="oc-table__cell oc-table__cell--action">Action</span>
+                    </div>
+                    <div class="oc-table__body" role="table">
+                        <div
+                            v-for="row in rows"
+                            :key="row.id"
+                            class="oc-table__row"
+                            :data-tone="row.tone"
+                            :data-selected="row.id === focusedId ? 'true' : 'false'"
+                            role="row"
+                            @click="activateRow(row.id)"
+                        >
+                            <span class="oc-table__cell oc-table__cell--check">
+                                <button
+                                    v-if="row.selectable"
+                                    type="button"
+                                    class="oc-check"
+                                    :data-on="row.selected ? 'true' : 'false'"
+                                    :aria-pressed="row.selected ? 'true' : 'false'"
+                                    :aria-label="'Select ' + row.name"
+                                    @click="toggleRow(row.id)"
+                                >
+                                </button>
+                                <span v-else class="oc-check oc-check--locked" aria-hidden="true">·</span>
+                            </span>
+                            <span class="oc-table__cell oc-table__cell--name" :title="row.name">{{ row.name }}</span>
+                            <span class="oc-table__cell oc-table__cell--path" :title="row.path">{{ row.path }}</span>
+                            <span class="oc-table__cell oc-table__cell--bytes">{{ row.sizeText }}</span>
+                            <span class="oc-table__cell oc-table__cell--reason" :title="row.reasonText">{{ row.reasonText }}</span>
+                            <span class="oc-table__cell oc-table__cell--action">{{ row.actionText }}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div v-else class="oc-state">
+                    <p class="oc-state__title">
+                        {{ emptyTitle }}
+                    </p>
+                    <p class="oc-state__text">
+                        {{ emptyText }}
+                    </p>
+                </div>
+            </section>
+
+            <aside v-if="inspectorOpen" class="oc-inspector" aria-label="Inspector">
+                <div class="oc-inspector__head">
+                    <span class="oc-inspector__title">Inspector</span>
+                </div>
+                <div v-if="focusedPath" class="oc-inspector__body">
+                    <div class="oc-field">
+                        <span class="oc-field__key">Path</span>
+                        <span class="oc-field__value oc-field__value--mono" :title="focusedPath">{{ focusedPath }}</span>
+                    </div>
+                    <div class="oc-field">
+                        <span class="oc-field__key">Kind</span>
+                        <span class="oc-field__value">{{ focusedKind }}</span>
+                    </div>
+                    <div class="oc-field">
+                        <span class="oc-field__key">Size</span>
+                        <span class="oc-field__value oc-field__value--mono">{{ focusedSize }}</span>
+                    </div>
+                    <div class="oc-field">
+                        <span class="oc-field__key">Share</span>
+                        <span class="oc-field__value oc-field__value--mono">{{ focusedShare }}</span>
+                    </div>
+                    <div class="oc-field">
+                        <span class="oc-field__key">Reason</span>
+                        <span class="oc-field__value">{{ focusedReason }}</span>
+                    </div>
+                    <div class="oc-field">
+                        <span class="oc-field__key">Action</span>
+                        <span class="oc-field__value">{{ focusedAction }}</span>
+                    </div>
+                    <div class="oc-field">
+                        <span class="oc-field__key">Safety</span>
+                        <span class="oc-field__value">{{ focusedSafety }}</span>
+                    </div>
+                    <div class="oc-field">
+                        <span class="oc-field__key">Evidence</span>
+                        <span class="oc-field__value">{{ focusedEvidence }}</span>
+                    </div>
+                    <p v-if="focusedNote" class="oc-inspector__note">
+                        {{ focusedNote }}
+                    </p>
+                </div>
+                <p v-else class="oc-inspector__empty">
+                    {{ inspectorEmpty }}
+                </p>
+            </aside>
+        </div>
+
+        <footer class="oc-footer">
+            <div class="oc-summary">
+                <div class="oc-summary__facts">
+                    <span class="oc-summary__count">{{ selectionCountText }}</span>
+                    <span class="oc-summary__bytes">{{ selectionBytesText }}</span>
+                    <span class="oc-summary__mode">{{ selectionModeText }}</span>
+                </div>
+                <div class="oc-summary__actions">
+                    <button type="button" class="oc-btn" :disabled="clearDisabled" @click="clearSelection">
+                        Clear
+                    </button>
+                    <button type="button" class="oc-btn" :disabled="reviewDisabled" @click="openPlan">
+                        Review plan
+                    </button>
+                    <button type="button" class="oc-btn oc-btn--primary" :disabled="executeDisabled" @click="execute">
+                        {{ executeLabel }}
+                    </button>
+                </div>
+            </div>
+            <div class="oc-status">
+                <span class="oc-status__text">{{ statusBarText }}</span>
+                <span class="oc-status__right">
+                    <span class="oc-status__time">{{ lastScanText }}</span>
+                    <button type="button" class="oc-status__theme" @click="cycleTheme">
+                        {{ themeLabel }}
+                    </button>
+                </span>
+            </div>
+        </footer>
     </div>
 </template>
+
 <style>
-.oc-root {
-    min-height: 100vh;
-}
-.oc-body {
-    display: flex;
-    flex-direction: column;
-    gap: var(--vmz-space-4, 1rem);
-    width: min(var(--vmz-layout-max-width, 75rem), calc(100% - (var(--vmz-layout-gutter, 1rem) * 2)));
-    margin: 0 auto;
-}
-.oc-head h1 {
-    margin: 0 0 0.35rem;
-    font-size: 1.35rem;
-}
-.oc-head p {
+html,
+body {
+    height: 100%;
     margin: 0;
-    color: var(--vmz-text-steel, var(--vmz-text-muted, #8b93a7));
+    overflow: hidden;
+    background: var(--vmz-surface-page);
 }
-.oc-modes {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--vmz-space-2, 0.5rem);
-}
-.oc-bar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--vmz-space-3, 0.75rem);
-    margin-top: var(--vmz-space-3, 0.75rem);
-    padding: var(--vmz-space-3, 0.75rem);
-    border: 1px solid var(--vmz-line-default, #2a3140);
-    border-radius: var(--vmz-radius-md, 8px);
-}
-.oc-bar__item {
+
+.oc-root {
+    position: fixed;
+    inset: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.15rem;
-    min-width: 10rem;
+    min-height: 0;
+    background: var(--vmz-surface-page);
+    color: var(--vmz-text-ink);
+    font-family: var(--vmz-font-sans);
+    font-size: 13px;
+    line-height: 1.4;
 }
-.oc-bar__key {
-    color: var(--vmz-text-steel, #8b93a7);
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-}
-.oc-bar__value {
-    font-size: 0.82rem;
-    word-break: break-all;
-}
-.oc-actions {
+
+.oc-header {
     display: flex;
-    flex-wrap: wrap;
-    gap: var(--vmz-space-2, 0.5rem);
-    margin-top: var(--vmz-space-3, 0.75rem);
+    align-items: center;
+    gap: 0.75rem;
+    flex: none;
+    height: 40px;
+    padding: 0 0.75rem;
+    border-bottom: 1px solid var(--vmz-line-default);
+    background: var(--vmz-surface-paper);
 }
-.oc-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-    gap: var(--vmz-space-3, 0.75rem);
-    margin-bottom: var(--vmz-space-4, 1rem);
+
+.oc-header__brand {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--vmz-text-ink);
+    white-space: nowrap;
 }
-.oc-stat {
-    padding: var(--vmz-space-3, 0.75rem);
-    border: 1px solid var(--vmz-line-default, #2a3140);
-    border-radius: var(--vmz-radius-md, 8px);
-    background: var(--vmz-surface-mist, var(--vmz-surface-paper, #1a1e27));
+
+.oc-scope {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
 }
-.oc-stat__label {
-    color: var(--vmz-text-steel, #8b93a7);
+
+.oc-scope__key {
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-scope__input {
+    flex: 1;
+    min-width: 0;
+    height: 26px;
+    padding: 0 0.5rem;
+    border: 1px solid var(--vmz-line-default);
+    border-radius: var(--vmz-radius-sm);
+    background: var(--vmz-surface-mist);
+    color: var(--vmz-text-ink);
+    font-family: var(--vmz-font-mono);
     font-size: 0.75rem;
 }
-.oc-stat__value {
-    margin-top: 0.25rem;
+
+.oc-scope__input:focus {
+    outline: 2px solid var(--vmz-focus-ring);
+    outline-offset: -1px;
+    background: var(--vmz-surface-paper);
+}
+
+.oc-header__domain {
+    display: none;
+    height: 26px;
+    padding: 0 0.375rem;
+    border: 1px solid var(--vmz-line-default);
+    border-radius: var(--vmz-radius-sm);
+    background: var(--vmz-surface-paper);
+    color: var(--vmz-text-ink);
+    font-family: var(--vmz-font-sans);
+    font-size: 0.75rem;
+}
+
+.oc-header__actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: none;
+}
+
+.oc-main {
+    position: relative;
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+
+.oc-domains {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: none;
+    width: 200px;
+    padding: 0.375rem;
+    border-right: 1px solid var(--vmz-line-default);
+    background: var(--vmz-surface-mist);
+    overflow: auto;
+}
+
+.oc-domains__title {
+    padding: 0.375rem 0.5rem;
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--vmz-text-muted);
+}
+
+.oc-domains button {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.125rem;
+    padding: 0.375rem 0.5rem;
+    border: 0;
+    border-left: 2px solid transparent;
+    border-radius: var(--vmz-radius-sm);
+    background: transparent;
+    color: var(--vmz-text-ink);
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.oc-domains button:hover:not(:disabled) {
+    background: var(--vmz-action-secondary-hover);
+}
+
+.oc-domains button:disabled {
+    cursor: default;
+    opacity: 0.55;
+}
+
+.oc-domains button:focus-visible {
+    outline: 2px solid var(--vmz-focus-ring);
+    outline-offset: -2px;
+}
+
+.oc-domains button[aria-current="true"] {
+    border-left-color: var(--vmz-action-primary-background);
+    background: var(--vmz-surface-paper);
+}
+
+.oc-domains__label {
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.oc-domains__hint {
+    font-size: 0.6875rem;
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-work {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--vmz-surface-paper);
+}
+
+.oc-work > [data-vmz="DiskBoard"] {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+.oc-work > [data-vmz="DiskBoard"] > .oc-board {
+    flex: 1;
+    min-height: 0;
+}
+
+.oc-work__bar {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    flex: none;
+    min-height: 38px;
+    padding: 0 0.75rem;
+    border-bottom: 1px solid var(--vmz-line-default);
+}
+
+.oc-work__heading {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.oc-work__title {
+    margin: 0;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.oc-work__meta {
+    font-size: 0.6875rem;
+    color: var(--vmz-text-tertiary);
     font-variant-numeric: tabular-nums;
-    font-size: 1.1rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
-.oc-stat__value--path {
-    font-size: 0.85rem;
-    word-break: break-all;
+
+.oc-filter {
+    flex: 1;
+    min-width: 6rem;
+    max-width: 18rem;
+    height: 26px;
+    padding: 0 0.5rem;
+    border: 1px solid var(--vmz-line-default);
+    border-radius: var(--vmz-radius-sm);
+    background: var(--vmz-surface-mist);
+    color: var(--vmz-text-ink);
+    font-family: var(--vmz-font-sans);
+    font-size: 0.75rem;
 }
-.oc-subhead {
-    margin: var(--vmz-space-4, 1rem) 0 var(--vmz-space-2, 0.5rem);
-    font-size: 0.95rem;
+
+.oc-filter:focus {
+    outline: 2px solid var(--vmz-focus-ring);
+    outline-offset: -1px;
+    background: var(--vmz-surface-paper);
 }
-.oc-note {
-    margin: var(--vmz-space-2, 0.5rem) 0 0;
-    color: var(--vmz-text-steel, #8b93a7);
-    font-size: 0.8rem;
+
+.oc-btn {
+    flex: none;
+    height: 26px;
+    padding: 0 0.625rem;
+    border: 1px solid var(--vmz-line-default);
+    border-radius: var(--vmz-radius-sm);
+    background: var(--vmz-action-secondary-background);
+    color: var(--vmz-text-ink);
+    font-family: var(--vmz-font-sans);
+    font-size: 0.75rem;
+    cursor: pointer;
+}
+
+.oc-btn:hover:not(:disabled) {
+    background: var(--vmz-action-secondary-hover);
+}
+
+.oc-btn:focus-visible {
+    outline: 2px solid var(--vmz-focus-ring);
+    outline-offset: 1px;
+}
+
+.oc-btn:disabled {
+    cursor: default;
+    opacity: 0.5;
+}
+
+.oc-btn--primary {
+    border-color: var(--vmz-action-primary-background);
+    background: var(--vmz-action-primary-background);
+    color: var(--vmz-action-primary-foreground);
+}
+
+.oc-btn--primary:hover:not(:disabled) {
+    background: var(--vmz-action-primary-hover);
+}
+
+.oc-work__bar .oc-btn {
+    margin-left: auto;
+}
+
+.oc-state {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-height: 0;
+    padding: 2rem;
+    overflow: auto;
+}
+
+.oc-state__title {
+    margin: 0;
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.oc-state__text {
+    margin: 0;
+    max-width: 46rem;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-state--error {
+    border-left: 2px solid var(--vmz-status-danger-accent);
+    background: var(--vmz-status-danger-background);
+}
+
+.oc-state--error .oc-state__title {
+    color: var(--vmz-status-danger-foreground);
+}
+
+.oc-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--vmz-line-default);
+    border-top-color: var(--vmz-action-primary-background);
+    border-radius: 50%;
+    animation: oc-spin 0.9s linear infinite;
+}
+
+@keyframes oc-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.oc-table {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+.oc-table__head,
+.oc-table__row {
+    display: grid;
+    grid-template-columns: 22px minmax(8rem, 1fr) minmax(10rem, 2fr) 5.5rem minmax(9rem, 1.2fr) 7.5rem;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0 0.75rem;
+}
+
+.oc-table__head {
+    flex: none;
+    height: 28px;
+    border-bottom: 1px solid var(--vmz-line-default);
+    background: var(--vmz-surface-mist);
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-table__head .oc-table__cell {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: default;
+}
+
+.oc-table__head button.oc-table__cell {
+    cursor: pointer;
+}
+
+.oc-table__head button.oc-table__cell:hover {
+    color: var(--vmz-text-ink);
+}
+
+.oc-table__body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+.oc-table__row {
+    min-height: 30px;
+    border-bottom: 1px solid var(--vmz-line-subtle);
+    cursor: pointer;
+}
+
+.oc-table__row:hover {
+    background: var(--vmz-action-secondary-hover);
+}
+
+.oc-table__row[data-selected="true"] {
+    background: var(--vmz-action-primary-soft);
+    border-left: 2px solid var(--vmz-action-primary-background);
+    padding-left: calc(0.75rem - 2px);
+}
+
+.oc-table__row[data-tone="skipped"] {
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-table__cell {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.75rem;
+}
+
+.oc-table__cell--path,
+.oc-table__cell--bytes {
+    font-family: var(--vmz-font-mono);
+    font-size: 0.6875rem;
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-table__cell--bytes {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.oc-table__cell--reason,
+.oc-table__cell--action {
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-table__cell--check {
+    display: flex;
+    align-items: center;
+}
+
+.oc-check {
+    width: 14px;
+    height: 14px;
+    padding: 0;
+    border: 1px solid var(--vmz-line-strong);
+    border-radius: 3px;
+    background: var(--vmz-surface-paper);
+    cursor: pointer;
+}
+
+.oc-check[data-on="true"] {
+    border-color: var(--vmz-action-primary-background);
+    background: var(--vmz-action-primary-background);
+}
+
+.oc-check[data-on="true"]::after {
+    content: "";
+    display: block;
+    width: 6px;
+    height: 3px;
+    margin: 2px 0 0 3px;
+    border-left: 2px solid var(--vmz-action-primary-foreground);
+    border-bottom: 2px solid var(--vmz-action-primary-foreground);
+    transform: rotate(-45deg);
+}
+
+.oc-check--locked {
+    border: 0;
+    cursor: default;
+    color: var(--vmz-text-muted);
+    text-align: center;
+}
+
+.oc-plan {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    padding: 0.75rem;
+    gap: 0.625rem;
+}
+
+.oc-plan__head {
+    flex: none;
+}
+
+.oc-plan__title {
+    margin: 0;
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.oc-plan__meta {
+    margin: 0.25rem 0 0;
+    font-size: 0.6875rem;
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-plan__list {
+    flex: 1;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    overflow: auto;
+    list-style: none;
+    border-top: 1px solid var(--vmz-line-subtle);
+}
+
+.oc-plan__row {
+    display: grid;
+    grid-template-columns: minmax(10rem, 1.4fr) minmax(10rem, 2fr);
+    gap: 0.75rem;
+    padding: 0.375rem 0;
+    border-bottom: 1px solid var(--vmz-line-subtle);
+    font-size: 0.75rem;
+}
+
+.oc-plan__row[data-tone="skipped"] {
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-plan__key {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--vmz-font-mono);
+    font-size: 0.6875rem;
+}
+
+.oc-plan__value {
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-plan__warning {
+    flex: none;
+    margin: 0;
+    padding: 0.375rem 0.5rem;
+    border-left: 2px solid var(--vmz-status-warning-accent);
+    background: var(--vmz-status-warning-background);
+    color: var(--vmz-status-warning-foreground);
+    font-size: 0.6875rem;
+    line-height: 1.5;
+}
+
+.oc-plan__actions {
+    display: flex;
+    justify-content: flex-end;
+    flex: none;
+}
+
+.oc-inspector {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    width: 300px;
+    border-left: 1px solid var(--vmz-line-default);
+    background: var(--vmz-surface-mist);
+    overflow: auto;
+}
+
+.oc-inspector__head {
+    flex: none;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--vmz-line-subtle);
+}
+
+.oc-inspector__title {
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--vmz-text-muted);
+}
+
+.oc-inspector__body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+    padding: 0.625rem 0.75rem;
+}
+
+.oc-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+}
+
+.oc-field__key {
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--vmz-text-muted);
+}
+
+.oc-field__value {
+    font-size: 0.75rem;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.oc-field__value--mono {
+    font-family: var(--vmz-font-mono);
+    font-size: 0.6875rem;
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-inspector__note {
+    margin: 0;
+    font-size: 0.6875rem;
+    line-height: 1.5;
+    color: var(--vmz-text-muted);
+}
+
+.oc-inspector__empty {
+    margin: 0;
+    padding: 0.75rem;
+    font-size: 0.6875rem;
+    line-height: 1.5;
+    color: var(--vmz-text-muted);
+}
+
+.oc-footer {
+    flex: none;
+    border-top: 1px solid var(--vmz-line-default);
+    background: var(--vmz-surface-paper);
+}
+
+.oc-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-height: 36px;
+    padding: 0 0.75rem;
+    border-bottom: 1px solid var(--vmz-line-subtle);
+}
+
+.oc-summary__facts {
+    display: flex;
+    align-items: baseline;
+    gap: 0.625rem;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 0.75rem;
+}
+
+.oc-summary__count {
+    font-weight: 600;
+}
+
+.oc-summary__bytes {
+    font-family: var(--vmz-font-mono);
+    font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--vmz-text-ink);
+}
+
+.oc-summary__mode {
+    font-size: 0.6875rem;
+    color: var(--vmz-text-tertiary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.oc-summary__actions {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-left: auto;
+}
+
+.oc-status {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    height: 26px;
+    padding: 0 0.75rem;
+    font-size: 0.6875rem;
+    color: var(--vmz-text-tertiary);
+}
+
+.oc-status__text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.oc-status__right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+}
+
+.oc-status__theme {
+    border: 0;
+    background: transparent;
+    color: var(--vmz-text-tertiary);
+    font: inherit;
+    cursor: pointer;
+}
+
+.oc-status__theme:hover {
+    color: var(--vmz-text-ink);
+}
+
+@media (max-width: 1020px) {
+    .oc-domains {
+        display: none;
+    }
+
+    .oc-header__domain {
+        display: block;
+    }
+}
+
+@media (max-width: 940px) {
+    .oc-inspector {
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 3;
+        width: 280px;
+        border-left: 1px solid var(--vmz-line-strong);
+        box-shadow: var(--vmz-shadow-popup);
+    }
+
+    .oc-table__head,
+    .oc-table__row {
+        grid-template-columns: 22px minmax(7rem, 1fr) minmax(8rem, 1.6fr) 4.75rem 6.5rem;
+    }
+
+    .oc-table__cell--action {
+        display: none;
+    }
 }
 </style>
+
 <script client>
-const SKIP_REASONS = [
-    ["recent", "modified within the age threshold"],
-    ["symlink", "symbolic link or junction"],
-    ["protected", "protected path"],
-    ["inUse", "open by another process"],
-    ["cwdShielded", "process working directory"],
-    ["processTemp", "process temp directory"],
-    ["programShielded", "running program image directory"],
-    ["dirRecent", "a directory on the path holds newer content"],
-    ["devRoot", "directory holds a project manifest"],
-    ["buildRoot", "inside a declared build root"],
-    ["unreadable", "unreadable entry"],
+const DOMAINS = [
+    { id: "disk", label: "Disk usage", hint: "Largest files under a root" },
+    { id: "temp", label: "Temp files", hint: "Older than the cutoff" },
+    { id: "dev", label: "Dev artifacts", hint: "Project build caches" },
+    { id: "buildRoots", label: "Build roots", hint: "Declared in the config" },
+    { id: "registry", label: "Registry residue", hint: "Orphaned keys" },
+    { id: "envPath", label: "PATH entries", hint: "Empty, missing or duplicate" },
+    { id: "software", label: "Software residue", hint: "Uninstalled leftovers" },
 ];
-const ITEM_DISPLAY_LIMIT = 300;
 
-export default class IndexPage {
-    title = "Open Cleaner";
-    lead = "Pick a rule set, inspect what it would touch, then execute it and read every outcome.";
-    navItems = [{ id: "scan", title: "Reclaim", href: "/" }];
+const DOMAIN_TITLES = {
+    disk: "Disk usage",
+    temp: "Temp files",
+    dev: "Dev artifacts",
+    buildRoots: "Build roots",
+    registry: "Registry residue",
+    envPath: "PATH entries",
+    software: "Software residue",
+};
 
-    sessionCardTitle = "Rule set";
-    sessionCardDesc = "The bar always shows the root, rule set and threshold used by the next action.";
+function baseName(value) {
+    const text = String(value || "").replace(/[\\/]+$/, "");
+    const cut = Math.max(text.lastIndexOf("\\"), text.lastIndexOf("/"));
+    return cut >= 0 ? text.slice(cut + 1) || text : text;
+}
 
-    rootLabel = "Root directory";
-    rootDesc = "Absolute path. Empty means the system temp folder for scan and temp, and the default config for build roots.";
-    rootPlaceholder = "Empty = default";
-    thresholdLabel = "Minimum age in days";
-    thresholdDesc = "A file is a candidate only when its modification time is at least this old. Day 0 files are never touched.";
-    thresholdPlaceholder = "7";
+function formatBytes(bytes) {
+    const value = Number(bytes) || 0;
+    if (value < 1024) return value + " B";
+    const units = ["KB", "MB", "GB", "TB"];
+    let scaled = value / 1024;
+    let index = 0;
+    while (scaled >= 1024 && index < units.length - 1) {
+        scaled /= 1024;
+        index += 1;
+    }
+    return (scaled >= 100 ? scaled.toFixed(0) : scaled.toFixed(1)) + " " + units[index];
+}
 
-    scanCardTitle = "Scan";
-    scanCardDesc = "Read-only listing of the largest entries under the root.";
-    scanLabel = "Scan";
-    closeLabel = "Close";
-    errorTitle = "Action failed";
-    statusTitle = "Status";
-    resultCardTitle = "Results";
-    resultCardDesc = "Largest entries from the last scan.";
-    totalLabel = "Total";
-    countLabel = "Entries";
-    scannedRootLabel = "Root";
-    emptyTitle = "No results yet";
-    emptyDesc = "Run a scan to populate this table.";
-    loadingLabel = "Scanning";
-    loadingText = "Working…";
+function formatCount(value, noun) {
+    const count = Number(value) || 0;
+    return count + " " + noun + (count === 1 ? "" : "s");
+}
 
-    planTempLabel = "Build plan";
-    cleanTempLabel = "Delete planned files";
-    tempPlanTitle = "Temp plan";
-    tempPlanDesc = "Read-only. Each candidate was checked for age, protection, links and occupancy before it was counted.";
-    tempResultTitle = "Temp execution";
-    tempResultDesc = "Every file that reached the deletion pass is listed with its outcome and reason.";
-    planRootsLabel = "Read config and build plan";
-    cleanRootsLabel = "Delete removable roots";
-    rootsPlanTitle = "Build-root plan";
-    rootsPlanDesc = "Only directories declared as absolute paths in the config file are evaluated, and each entry names its authorizing line.";
-    rootsResultTitle = "Build-root execution";
-    rootsResultDesc = "Directories are removed whole, so each entry reports one outcome for the whole subtree.";
-
-    mode = "scan";
-    showScan = true;
-    showTemp = false;
-    showRoots = false;
-    scanModeVariant = "default";
-    tempModeVariant = "secondary";
-    rootsModeVariant = "secondary";
-
-    root = "";
-    olderThanDaysText = "7";
-    rootText = "system temp folder (default)";
-    ruleSetText = "scan: directory entries, read only";
-    thresholdText = "not used";
-
-    busy = false;
-    error = "";
-    status = "Ready.";
-
-    scanColumns = [
-        { id: "kind", title: "Kind" },
-        { id: "bytes", title: "Size", align: "right" },
-        { id: "path", title: "Path" },
-    ];
-    countColumns = [
-        { id: "label", title: "Bucket" },
-        { id: "files", title: "Files", align: "right" },
-        { id: "bytes", title: "Size", align: "right" },
-        { id: "share", title: "Share", align: "right" },
-    ];
-    skipColumns = [
-        { id: "reason", title: "Skip reason" },
-        { id: "files", title: "Entries", align: "right" },
-    ];
-    sampleColumns = [
-        { id: "path", title: "Path" },
-        { id: "age", title: "Age", align: "right" },
-        { id: "bytes", title: "Size", align: "right" },
-    ];
-    itemColumns = [
-        { id: "status", title: "Status" },
-        { id: "bytes", title: "Size", align: "right" },
-        { id: "reason", title: "Reason" },
-        { id: "path", title: "Path" },
-    ];
-    rootsColumns = [
-        { id: "path", title: "Declared path" },
-        { id: "line", title: "Line", align: "right" },
-        { id: "files", title: "Files", align: "right" },
-        { id: "bytes", title: "Size", align: "right" },
-        { id: "status", title: "Status" },
-    ];
-    rootItemColumns = [
-        { id: "path", title: "Declared path" },
-        { id: "line", title: "Line", align: "right" },
-        { id: "files", title: "Files", align: "right" },
-        { id: "bytes", title: "Size", align: "right" },
-        { id: "status", title: "Status" },
-        { id: "reason", title: "Reason" },
-    ];
-
-    rows = [];
-    sortKey = "bytes";
-    sortDir = "desc";
-    totalText = "—";
-    countText = "—";
-    scannedRoot = "—";
-
-    tempPlan = null;
-    tempPlanExists = false;
-    tempExecuteDisabled = true;
-    tempCandidatesText = "—";
-    tempScannedText = "—";
-    tempRootText = "—";
-    tempProbeText = "";
-    tempWarnings = "";
-    ageRows = [];
-    extRows = [];
-    skipRows = [];
-    sampleRows = [];
-    tempSamplesNote = "";
-
-    tempResultExists = false;
-    tempDeletedText = "—";
-    tempFreedText = "—";
-    tempSkippedText = "—";
-    tempItemRows = [];
-    tempItemNote = "";
-    tempResultWarnings = "";
-
-    rootsPlanExists = false;
-    rootsExecuteDisabled = true;
-    rootsConfigText = "—";
-    rootsDeclaredText = "—";
-    rootsRemovableText = "—";
-    rootsWarnings = "";
-    rootsRows = [];
-    rootsResultExists = false;
-    rootsDeletedText = "—";
-    rootsFreedText = "—";
-    rootsResultConfigText = "—";
-    rootsResultWarnings = "";
-    rootsItemRows = [];
-    _removableRoots = [];
-    _seq = 0;
-    _entries = [];
+export default class OpenCleanerPage {
+    public domains = [...DOMAINS];
+    /** Domain titles double as the workbench heading; kept as a field so the template never reads module scope. */
+    public domainTitles = DOMAIN_TITLES;
+    public domain = "disk";
+    public busy = false;
+    public errorText = "";
+    public errorTitle = "Scan failed";
+    public statusText = "";
+    public root = "";
+    public rootPlaceholder = "Root path (empty = host default)";
+    public filter = "";
+    public filterVisible = false;
+    public rows = [];
+    public raw = [];
+    public sortKey = "bytes";
+    public sortDir = "desc";
+    public planOpen = false;
+    public planTitle = "";
+    public planMeta = "";
+    public planRows = [];
+    public planWarning = "";
+    public resultsOpen = false;
+    public resultTitle = "";
+    public resultMeta = "";
+    public resultRows = [];
+    public boardRows = [];
+    public boardTitle = "Disk usage";
+    public boardMeta = "";
+    public boardNote = "";
+    public boardTotal = 0;
+    public focusedId = "";
+    public focusedPath = "";
+    public focusedKind = "";
+    public focusedSize = "";
+    public focusedShare = "";
+    public focusedReason = "";
+    public focusedAction = "";
+    public focusedSafety = "";
+    public focusedEvidence = "";
+    public focusedNote = "";
+    public inspectorOpen = true;
+    public inspectorLabel = "Hide inspector";
+    public inspectorAttr = "true";
+    public inspectorEmpty = "Select a candidate to see why it was flagged, what the app can do with it and how risky that is.";
+    public selectedCount = 0;
+    public selectedBytes = 0;
+    public selectionCountText = "No selection";
+    public selectionBytesText = "";
+    public selectionModeText = "";
+    public statusBarText = "";
+    public lastScanText = "";
+    public scanLabel = "Scan";
+    public executeLabel = "Execute";
+    public reviewDisabled = true;
+    public executeDisabled = true;
+    public clearDisabled = true;
+    public domainTitle = "Disk usage";
+    public domainMeta = "";
+    public emptyTitle = "Nothing scanned yet";
+    public emptyText = "Run a scan to load real candidates from this machine.";
+    public themeLabel = "Theme: Auto";
+    public themeValue = "";
+    public host = null;
+    public activeId = "";
+    public seq = 0;
+    public mode = "trash";
+    public tempCutoffMs = 0;
+    public tempRoot = "";
+    public tempOlderThanDays = 7;
+    public buildConfig = "";
+    public scanStartedMs = 0;
+    /** Whole-plan totals for temp scans; per-file selection is not offered there. */
+    public planTempFiles = 0;
+    public planTempBytes = 0;
 
     onMount() {
-        this.installHostBridge();
-        const bridge = globalThis.chrome && globalThis.chrome.webview;
-        if (bridge && bridge.postMessage) this.runScan();
+        const viewport = typeof window !== "undefined" ? window.innerWidth : 1280;
+        this.inspectorOpen = viewport >= 940;
+        this.syncInspector();
+        if (!this.installBridge()) return;
+        this.runScan();
     }
 
-    setModeScan() {
-        this.applyMode("scan", true, false, false);
+    installBridge() {
+        const host =
+            typeof chrome !== "undefined" && chrome && chrome.webview ? chrome.webview : null;
+        if (!host) {
+            this.busy = false;
+            this.errorText =
+                "Native host bridge is unavailable. Open this workbench through `open-cleaner gui`.";
+            this.statusBarText = "Host bridge missing";
+            return false;
+        }
+        this.host = host;
+        host.addEventListener("message", (event) => this.onHostMessage(event && event.data));
+        return true;
     }
 
-    setModeTemp() {
-        this.applyMode("temp", false, true, false);
+    post(type, extra) {
+        if (!this.host) return;
+        this.seq += 1;
+        const id = "oc-" + this.seq;
+        this.activeId = id;
+        const message = Object.assign({ type, id }, extra || {});
+        this.host.postMessage(JSON.stringify(message));
     }
 
-    setModeRoots() {
-        this.applyMode("roots", false, false, true);
+    onHostMessage(raw) {
+        if (!raw) return;
+        let message = raw;
+        if (typeof raw === "string") {
+            try {
+                message = JSON.parse(raw);
+            } catch {
+                return;
+            }
+        }
+        if (!message || !message.type) return;
+        if (message.id !== this.activeId) return;
+        if (message.type === "scanResult") return this.applyScan(message.report);
+        if (message.type === "devPlanResult") return this.applyDevPlan(message.report);
+        if (message.type === "devCleanResult") return this.applyDevClean(message.report);
+        if (message.type === "tempPlanResult") return this.applyTempPlan(message.report);
+        if (message.type === "tempCleanResult") return this.applyTempClean(message.report);
+        if (message.type === "buildRootPlanResult") return this.applyBuildRootPlan(message.report);
+        if (message.type === "buildRootCleanResult") return this.applyBuildRootClean(message.report);
+        if (message.type === "registryResidueResult") return this.applyRegistry(message.report);
+        if (message.type === "envPathScanResult") return this.applyEnvPath(message.report);
+        if (message.type === "softwareResidueResult") return this.applySoftware(message.report);
+        if (String(message.type).indexOf("Error") >= 0) return this.fail(message.message);
     }
 
-    applyMode(mode, scan, temp, roots) {
-        this.mode = mode;
-        this.showScan = scan;
-        this.showTemp = temp;
-        this.showRoots = roots;
-        this.scanModeVariant = scan ? "default" : "secondary";
-        this.tempModeVariant = temp ? "default" : "secondary";
-        this.rootsModeVariant = roots ? "default" : "secondary";
-        this.tempPlanExists = false;
-        this.tempResultExists = false;
-        this.rootsPlanExists = false;
-        this.rootsResultExists = false;
-        this.ageRows = [];
-        this.extRows = [];
-        this.skipRows = [];
-        this.sampleRows = [];
-        this.tempItemRows = [];
-        this.rootsRows = [];
-        this.rootsItemRows = [];
-        this.tempWarnings = "";
-        this.tempResultWarnings = "";
-        this.rootsWarnings = "";
-        this.rootsResultWarnings = "";
-        this.error = "";
-        this.status = "Ready.";
-        this.refreshBar();
+    pickDomain(id) {
+        if (this.busy || !id || id === this.domain) return;
+        this.domain = id;
+        this.resetDomainView();
+        this.runScan();
     }
 
-    onRootInput(e) {
-        this.root = e && e.target ? String(e.target.value || "") : "";
-        this.refreshBar();
+    onDomainChange(event) {
+        const next = event && event.target ? event.target.value : "";
+        this.pickDomain(next);
     }
 
-    onThresholdInput(e) {
-        this.olderThanDaysText = e && e.target ? String(e.target.value || "") : "";
-        this.refreshBar();
+    onRootInput(event) {
+        this.root = event && event.target ? event.target.value : "";
     }
 
-    thresholdDays() {
-        const parsed = parseInt(this.olderThanDaysText, 10);
-        if (!Number.isFinite(parsed) || parsed < 1) return 7;
-        return Math.min(parsed, 365);
+    onRootKey(event) {
+        if (event && event.key === "Enter") this.runScan();
     }
 
-    refreshBar() {
-        const root = (this.root || "").trim();
-        if (this.mode === "roots") {
-            this.rootText = root || "default build-root config";
-            this.ruleSetText = "build roots: config-declared absolute paths";
-            this.thresholdText = "10 minute write window";
-        } else if (this.mode === "temp") {
-            this.rootText = root || "system temp folder (default)";
-            this.ruleSetText = "temp files: per-file age, protection, link and occupancy checks";
-            this.thresholdText = `${this.thresholdDays()} days`;
-        } else {
-            this.rootText = root || "system temp folder (default)";
-            this.ruleSetText = "scan: directory entries, read only";
-            this.thresholdText = "not used";
+    onFilterInput(event) {
+        this.filter = event && event.target ? event.target.value : "";
+        this.refreshRows();
+    }
+
+    toggleInspector() {
+        this.inspectorOpen = !this.inspectorOpen;
+        this.syncInspector();
+    }
+
+    syncInspector() {
+        this.inspectorLabel = this.inspectorOpen ? "Hide inspector" : "Show inspector";
+        this.inspectorAttr = this.inspectorOpen ? "true" : "false";
+    }
+
+    cycleTheme() {
+        if (this.themeValue === "") {
+            this.themeValue = "light";
+            this.themeLabel = "Theme: Light";
+            return;
+        }
+        if (this.themeValue === "light") {
+            this.themeValue = "dark";
+            this.themeLabel = "Theme: Dark";
+            return;
+        }
+        this.themeValue = "";
+        this.themeLabel = "Theme: Auto";
+    }
+
+    domainClass(id) {
+        return id === this.domain ? "oc-domains__item is-active" : "oc-domains__item";
+    }
+
+    resetDomainView() {
+        this.raw = [];
+        this.rows = [];
+        this.planTempFiles = 0;
+        this.planTempBytes = 0;
+        this.mode = "trash";
+        this.candidatesReset();
+        this.boardRows = [];
+        this.boardTitle = this.domainTitles[this.domain] || "";
+        this.boardMeta = "";
+        this.boardNote = "";
+        this.boardTotal = 0;
+        this.focusedId = "";
+        this.clearFocused();
+        this.planOpen = false;
+        this.resultsOpen = false;
+        this.errorText = "";
+        this.domainTitle = this.domainTitles[this.domain] || "";
+        this.domainMeta = "";
+        this.filter = "";
+        this.filterVisible = this.domain !== "disk";
+        this.emptyTitle = "Nothing scanned yet";
+        this.emptyText = "Run a scan to load real candidates from this machine.";
+        this.recalcSelection();
+    }
+
+    runScan() {
+        if (this.busy) return;
+        if (!this.host) {
+            this.errorText = "Native host bridge is unavailable.";
+            return;
+        }
+        this.busy = true;
+        this.errorText = "";
+        this.planOpen = false;
+        this.resultsOpen = false;
+        this.raw = [];
+        this.rows = [];
+        this.planTempFiles = 0;
+        this.planTempBytes = 0;
+        this.mode = "trash";
+        this.candidatesReset();
+        this.boardRows = [];
+        this.focusedId = "";
+        this.clearFocused();
+        this.scanStartedMs = Date.now();
+        this.statusText = (this.domainTitles[this.domain] || "Scan") + " scan in progress…";
+        this.statusBarText = "Scanning…";
+        this.lastScanText = "";
+        this.recalcSelection();
+
+        if (this.domain === "disk") {
+            this.post("scan", { root: this.root ? this.root : null });
+            return;
+        }
+        if (this.domain === "temp") {
+            this.post("tempPlan", {
+                options: {
+                    root: this.root ? this.root : null,
+                    olderThanDays: this.tempOlderThanDays,
+                    sampleLimit: 40,
+                },
+            });
+            return;
+        }
+        if (this.domain === "dev") {
+            this.post("devPlan", { options: this.devOptions(), mode: this.mode });
+            return;
+        }
+        if (this.domain === "buildRoots") {
+            this.post("buildRootPlan", { options: this.root ? { config: this.root } : {} });
+            return;
+        }
+        if (this.domain === "registry") {
+            this.post("registryResidue", { options: { limit: 60 } });
+            return;
+        }
+        if (this.domain === "envPath") {
+            this.post("envPathScan", { options: {} });
+            return;
+        }
+        if (this.domain === "software") {
+            this.post("softwareResidue", { options: { limit: 60 } });
         }
     }
 
-    installHostBridge() {
-        const bridge = globalThis.chrome && globalThis.chrome.webview;
-        if (!bridge || !bridge.addEventListener) return;
-        bridge.addEventListener("message", (event) => {
-            let data = event.data;
-            if (typeof data === "string") {
-                try {
-                    data = JSON.parse(data);
-                } catch {
-                    return;
-                }
-            }
-            if (!data || typeof data !== "object") return;
-            if (data.type === "scanResult") {
-                this.busy = false;
-                this.error = "";
-                this.applyReport(data.report || {});
-                this.status = "Scan complete.";
-            } else if (data.type === "scanError") {
-                this.fail(data.message);
-            } else if (data.type === "tempPlanResult") {
-                this.busy = false;
-                this.error = "";
-                this.applyTempPlan(data.report || {});
-                this.status = "Temp plan ready. Review it before deleting anything.";
-            } else if (data.type === "tempPlanError") {
-                this.fail(data.message);
-            } else if (data.type === "tempCleanResult") {
-                this.busy = false;
-                this.error = "";
-                this.applyTempResult(data.report || {});
-            } else if (data.type === "tempCleanError") {
-                this.fail(data.message);
-            } else if (data.type === "buildRootPlanResult") {
-                this.busy = false;
-                this.error = "";
-                this.applyRootsPlan(data.report || {});
-                this.status = "Build-root plan ready.";
-            } else if (data.type === "buildRootPlanError") {
-                this.fail(data.message);
-            } else if (data.type === "buildRootCleanResult") {
-                this.busy = false;
-                this.error = "";
-                this.applyRootsResult(data.report || {});
-            } else if (data.type === "buildRootCleanError") {
-                this.fail(data.message);
-            }
-        });
+    devOptions() {
+        return {
+            roots: this.root ? [this.root] : [],
+            includeGlobal: false,
+            limit: 200,
+        };
     }
 
     fail(message) {
         this.busy = false;
-        this.error = String(message || "unknown error");
-        this.status = "";
+        this.errorText = String(message || "The host rejected the request.");
+        this.statusText = "Scan failed";
+        this.statusBarText = "Scan failed";
+        this.emptyTitle = "Scan failed";
+        this.emptyText = "Fix the condition above and retry.";
+        this.recalcSelection();
     }
 
-    post(msg) {
-        const bridge = globalThis.chrome && globalThis.chrome.webview;
-        if (!bridge || !bridge.postMessage) {
-            this.busy = false;
-            this.error = "Native bridge unavailable (not running inside WebView2).";
-            this.status = "";
-            return false;
+    settleNote() {
+        const elapsed = Date.now() - this.scanStartedMs;
+        this.lastScanText = "Scan " + elapsed + " ms";
+        this.busy = false;
+    }
+
+    candidatesReset() {
+        this.selectedCount = 0;
+        this.selectedBytes = 0;
+    }
+
+    applyScan(report) {
+        this.settleNote();
+        const entries = report.entries || [];
+        const shown = entries.reduce((total, entry) => total + (Number(entry.bytes) || 0), 0);
+        this.boardRows = this.buildBoard(report.root, entries);
+        this.boardTitle = baseName(report.root) || report.root;
+        this.boardTotal = shown;
+        this.boardMeta =
+            "Scanned " + formatBytes(report.totalBytes) +
+            " · listing the " + entries.length + " largest files (" + formatBytes(shown) + ")";
+        this.boardNote =
+            "Bars compare the listed files, not every scanned byte. Drilling into a directory arrives with the treemap package.";
+        this.domainTitle = this.domainTitles.disk;
+        this.domainMeta = formatCount(entries.length, "file") + " listed";
+        this.statusText = "";
+        this.statusBarText = "Disk scan ready · " + formatCount(entries.length, "file") + " listed";
+        this.emptyTitle = "No files above the scan threshold";
+        this.emptyText = "This root produced no file entries. Choose another scope and scan again.";
+        const rootRow = this.boardRows.length ? this.boardRows[0] : null;
+        if (rootRow) this.focusNode(rootRow.id);
+        this.recalcSelection();
+    }
+
+    buildBoard(root, entries) {
+        const rootPath = String(root || "");
+        const rootId = rootPath || "root";
+        const rootRow = {
+            id: rootId,
+            parent: null,
+            path: rootPath,
+            label: baseName(rootPath) || rootPath,
+            depth: 0,
+            kind: "dir",
+            bytes: 0,
+        };
+        const nodes = {};
+        nodes[rootId] = rootRow;
+        const order = [rootId];
+        const lowerRoot = rootPath.replace(/[\\/]+$/, "").toLowerCase();
+
+        for (const entry of entries) {
+            const pathText = String(entry.path || "");
+            let rest = pathText;
+            if (lowerRoot && pathText.toLowerCase().indexOf(lowerRoot) === 0) {
+                rest = pathText.slice(lowerRoot.length).replace(/^[\\/]+/, "");
+            }
+            const segments = rest.split(/[\\/]+/).filter(Boolean);
+            if (!segments.length) continue;
+            let cursor = rootId;
+            for (let index = 0; index < segments.length; index += 1) {
+                const isFile = index === segments.length - 1;
+                const id = cursor + "\\" + segments[index];
+                let node = nodes[id];
+                if (!node) {
+                    node = {
+                        id,
+                        parent: cursor,
+                        path: (rootPath ? rootPath.replace(/[\\/]+$/, "") + "\\" : "") + segments.slice(0, index + 1).join("\\"),
+                        label: segments[index],
+                        depth: Math.min(index + 1, 4),
+                        kind: isFile ? String(entry.kind || "file") : "dir",
+                        bytes: 0,
+                    };
+                    nodes[id] = node;
+                    order.push(id);
+                }
+                node.bytes += Number(entry.bytes) || 0;
+                cursor = id;
+            }
         }
-        bridge.postMessage(JSON.stringify(msg));
-        return true;
-    }
 
-    nextId() {
-        this._seq += 1;
-        return this._seq;
-    }
+        rootRow.bytes = entries.reduce((sum, entry) => sum + (Number(entry.bytes) || 0), 0);
 
-    runScan() {
-        this.busy = true;
-        this.error = "";
-        this.status = "Scanning…";
-        const root = (this.root || "").trim();
-        if (!this.post({ type: "scan", id: this.nextId(), root: root || undefined })) {
-            this.busy = false;
+        const children = {};
+        for (const id of order) {
+            const node = nodes[id];
+            if (node.parent === null) continue;
+            if (!children[node.parent]) children[node.parent] = [];
+            children[node.parent].push(node);
         }
+        const flat = [];
+        const walk = (id) => {
+            const node = nodes[id];
+            flat.push(node);
+            const kids = children[id] || [];
+            kids.sort((left, right) => right.bytes - left.bytes);
+            for (const kid of kids) walk(kid.id);
+        };
+        walk(rootId);
+        return flat.slice(0, 260);
     }
 
-    planTemp() {
-        this.busy = true;
-        this.error = "";
-        this.status = "Collecting temp candidates…";
-        this.tempResultExists = false;
-        const options = { olderThanDays: this.thresholdDays() };
-        const root = (this.root || "").trim();
-        if (root) options.root = root;
-        if (!this.post({ type: "tempPlan", id: this.nextId(), options })) {
-            this.busy = false;
+    focusNode(id) {
+        this.focusedId = id;
+        let row = null;
+        for (const item of this.boardRows) {
+            if (item.id === id) {
+                row = item;
+                break;
+            }
         }
+        if (!row) return;
+        const share = this.boardTotal > 0 ? (row.bytes / this.boardTotal) * 100 : 0;
+        this.focusedPath = row.path;
+        this.focusedKind = row.kind === "dir" ? "Directory (rolled up)" : row.kind;
+        this.focusedSize = formatBytes(row.bytes);
+        this.focusedShare = share.toFixed(1) + "% of the listed files";
+        this.focusedReason = "Measured by the disk scan and classified as " + row.kind + ".";
+        this.focusedAction = "Read-only: the disk scan never deletes anything.";
+        this.focusedSafety = "No destructive action is available here.";
+        this.focusedEvidence = "Listed among the largest files under " + this.boardTitle + ".";
+        this.focusedNote = "";
     }
 
-    cleanTemp() {
-        if (!this.tempPlan) return;
-        this.busy = true;
-        this.error = "";
-        this.status = "Deleting the planned files…";
-        const options = { olderThanDays: this.thresholdDays(), cutoffUnixMs: this.tempPlan.cutoffUnixMs, confirm: true };
-        const root = (this.root || "").trim();
-        if (root) options.root = root;
-        if (!this.post({ type: "tempClean", id: this.nextId(), options })) {
-            this.busy = false;
+    applyDevPlan(report) {
+        this.settleNote();
+        if (!report.modeSupported && report.mode === "trash") {
+            this.mode = "permanent";
+            this.statusText = "Recycle bin unavailable; re-planning for permanent deletion…";
+            this.post("devPlan", { options: this.devOptions(), mode: "permanent" });
+            return;
         }
+        this.mode = report.mode || this.mode;
+        const items = report.items || [];
+        this.acceptCandidates(
+            items.map((item) => {
+                const artifact = item.artifact || {};
+                const removable = !!item.removable;
+                return {
+                    id: String(artifact.path || ""),
+                    name: baseName(artifact.path),
+                    path: String(artifact.path || ""),
+                    sizeText: formatBytes(artifact.bytes),
+                    bytes: Number(artifact.bytes) || 0,
+                    reasonText: [artifact.ecosystem, artifact.rule].filter(Boolean).join(" · "),
+                    actionText: removable ? (this.mode === "trash" ? "Recycle bin" : "Permanent delete") : "Keep",
+                    selectable: removable,
+                    selected: false,
+                    tone: removable ? "removable" : "skipped",
+                    baseline: artifact.baseline || null,
+                    kind: String(artifact.rule || "artifact"),
+                    safety: String(artifact.risk || ""),
+                    evidence: "Level " + artifact.level + " · " + String(artifact.anchor || ""),
+                    note: (artifact.warnings || []).join(" "),
+                    skipReason: String(item.skipReason || ""),
+                };
+            }),
+        );
+        this.domainMeta = formatCount(items.length, "artifact");
+        this.statusBarText =
+            "Dev scan ready · " + formatCount(items.length, "artifact") +
+            " · " + formatBytes(report.removableBytes) + " removable";
+        this.emptyTitle = "No developer artifacts";
+        this.emptyText = "No project build caches matched under this scope.";
     }
 
-    planBuildRoots() {
-        this.busy = true;
-        this.error = "";
-        this.status = "Reading the build-root config…";
-        this.rootsResultExists = false;
-        if (!this.post({ type: "buildRootPlan", id: this.nextId(), options: {} })) {
-            this.busy = false;
+    applyTempPlan(report) {
+        this.settleNote();
+        this.tempCutoffMs = report.cutoffUnixMs;
+        this.tempRoot = report.root;
+        this.tempOlderThanDays = report.olderThanDays;
+        const samples = report.samples || [];
+        this.acceptCandidates(
+            samples.map((sample) => ({
+                id: String(sample.path || ""),
+                name: baseName(sample.path),
+                path: String(sample.path || ""),
+                sizeText: formatBytes(sample.bytes),
+                bytes: Number(sample.bytes) || 0,
+                reasonText: "Untouched for " + sample.ageDays + " days",
+                actionText: "Covered by the plan",
+                selectable: false,
+                selected: false,
+                tone: "removable",
+                baseline: null,
+                kind: "temp",
+                safety: "Recent and in-use files are excluded by the scanner.",
+                evidence: "Older than " + report.olderThanDays + " days",
+                note: "Samples only; the plan covers every candidate.",
+                skipReason: "",
+            })),
+        );
+        this.planTempFiles = report.candidateFiles || 0;
+        this.planTempBytes = report.candidateBytes || 0;
+        this.domainMeta =
+            formatCount(report.candidateFiles, "candidate") + " · " + formatBytes(report.candidateBytes);
+        this.statusBarText =
+            "Temp plan ready · " + formatCount(report.candidateFiles, "candidate") +
+            " · " + formatBytes(report.candidateBytes);
+        this.emptyTitle = "No temp candidates";
+        this.emptyText = "Nothing under this root is older than the cutoff.";
+    }
+
+    applyBuildRootPlan(report) {
+        this.settleNote();
+        this.buildConfig = report.configPath || "";
+        const entries = report.entries || [];
+        this.acceptCandidates(
+            entries.map((entry) => ({
+                id: String(entry.path || ""),
+                name: baseName(entry.path),
+                path: String(entry.path || ""),
+                sizeText: formatBytes(entry.bytes),
+                bytes: Number(entry.bytes) || 0,
+                reasonText: "Line " + entry.line + " · " + String(entry.authorization || ""),
+                actionText: entry.removable ? "Delete directory" : "Keep",
+                selectable: !!entry.removable,
+                selected: false,
+                tone: entry.removable ? "removable" : "skipped",
+                baseline: null,
+                kind: "build-root",
+                safety: "Declared by the operator in the build-root config.",
+                evidence: String(report.configPath || ""),
+                note: "",
+                skipReason: String(entry.skipReason || ""),
+            })),
+        );
+        this.domainMeta =
+            formatCount(entries.length, "entry") + " · " + formatBytes(report.totalBytes);
+        this.statusBarText = report.configExists
+            ? "Build roots ready · " + formatCount(entries.length, "entry")
+            : "No build-root config found";
+        this.emptyTitle = report.configExists ? "No build roots declared" : "No build-root config";
+        this.emptyText = report.configExists
+            ? "The config declares no build roots for this scope."
+            : "Create the build-root config or point Scope at one, then scan again.";
+    }
+
+    applyRegistry(report) {
+        this.settleNote();
+        const findings = report.findings || [];
+        this.acceptCandidates(
+            findings.map((finding, index) => ({
+                id: "reg-" + index,
+                name: String(finding.displayName || finding.valueName || finding.kind),
+                path: String(finding.keyPath || ""),
+                sizeText: "—",
+                bytes: 0,
+                reasonText: String(finding.evidence || ""),
+                actionText: "Review only",
+                selectable: false,
+                selected: false,
+                tone: "review",
+                baseline: null,
+                kind: String(finding.kind || "registry"),
+                safety: String(finding.safety || ""),
+                evidence: String(finding.target || ""),
+                note: "Registry cleaning is not wired into this workbench yet.",
+                skipReason: "",
+            })),
+        );
+        this.domainMeta = formatCount(findings.length, "finding") + " · " + report.scannedKeys + " keys scanned";
+        this.statusBarText = "Registry residue ready · " + formatCount(findings.length, "finding");
+        this.emptyTitle = "No registry residue";
+        this.emptyText = "No orphaned keys matched in this scan.";
+    }
+
+    applyEnvPath(report) {
+        this.settleNote();
+        const scopes = report.scopes || [];
+        const rows = [];
+        let index = 0;
+        for (const scope of scopes) {
+            for (const entry of scope.entries || []) {
+                index += 1;
+                rows.push({
+                    id: "env-" + index,
+                    name: String(entry.raw || ""),
+                    path: String(entry.expanded || entry.raw || ""),
+                    sizeText: "—",
+                    bytes: 0,
+                    reasonText: String(entry.issue || "no issue") + " · " + String(entry.scope || ""),
+                    actionText: entry.removable ? "Review only" : "Keep",
+                    selectable: false,
+                    selected: false,
+                    tone: entry.issue ? "review" : "skipped",
+                    baseline: null,
+                    kind: "path-entry",
+                    safety: String(entry.safety || ""),
+                    evidence: String(entry.evidence || ""),
+                    note: "PATH cleaning needs a backup target and is not wired into this workbench yet.",
+                    skipReason: "",
+                });
+            }
         }
+        this.acceptCandidates(rows);
+        this.domainMeta = formatCount(rows.length, "entry") + " in " + formatCount(scopes.length, "scope");
+        this.statusBarText = "PATH scan ready · " + formatCount(rows.length, "entry");
+        this.emptyTitle = "No PATH entries";
+        this.emptyText = "Neither user nor machine PATH returned entries.";
     }
 
-    cleanBuildRoots() {
-        if (!this._removableRoots.length) return;
-        this.busy = true;
-        this.error = "";
-        this.status = "Deleting removable build roots…";
-        if (!this.post({ type: "buildRootClean", id: this.nextId(), options: { paths: this._removableRoots, confirm: true } })) {
-            this.busy = false;
-        }
+    applySoftware(report) {
+        this.settleNote();
+        const findings = report.findings || [];
+        this.acceptCandidates(
+            findings.map((finding) => ({
+                id: String(finding.id || finding.path || ""),
+                name: String(finding.displayName || baseName(finding.path)),
+                path: String(finding.path || ""),
+                sizeText: formatBytes(finding.bytes),
+                bytes: Number(finding.bytes) || 0,
+                reasonText: String(finding.rule || "") + " · " + String(finding.evidence || ""),
+                actionText: finding.removable ? "Review only" : "Keep",
+                selectable: false,
+                selected: false,
+                tone: "review",
+                baseline: null,
+                kind: String(finding.kind || "software"),
+                safety: String(finding.safety || ""),
+                evidence: String(finding.registryKey || ""),
+                note: "Software residue cleanup has no host command yet; review only.",
+                skipReason: "",
+            })),
+        );
+        this.domainMeta =
+            formatCount(findings.length, "finding") + " · " + formatCount(report.skipped.length, "skipped install");
+        this.statusBarText = "Software residue ready · " + formatCount(findings.length, "finding");
+        this.emptyTitle = "No software residue";
+        this.emptyText = formatCount(report.skipped.length, "install") + " were checked and kept.";
     }
 
-    requestClose() {
-        this.post({ type: "close" });
-    }
-
-    applyReport(report) {
-        this.scannedRoot = report.root || "—";
-        this.totalText = this.formatBytes(Number(report.totalBytes) || 0);
-        const entries = Array.isArray(report.entries) ? report.entries : [];
-        this._entries = entries.map((entry, index) => ({
-            id: String(index),
-            kind: String(entry.kind || ""),
-            bytes: Number(entry.bytes) || 0,
-            path: String(entry.path || ""),
+    applyDevClean(report) {
+        this.settleNote();
+        this.planOpen = false;
+        this.resultsOpen = true;
+        this.resultTitle = "Deletion finished";
+        this.resultMeta =
+            report.executed
+                ? "Freed " + formatBytes(report.freedBytes) + " · " + this.mode + " mode"
+                : "Host reported no execution";
+        this.resultRows = (report.items || []).map((item, index) => ({
+            id: "res-" + index,
+            key: String(item.path || ""),
+            value: String(item.status || "") + (item.reason ? " · " + item.reason : "") + " · " + formatBytes(item.bytes),
+            tone: item.status === "deleted" || item.status === "trashed" ? "removable" : "skipped",
         }));
-        this.countText = String(this._entries.length);
-        this.rebuildRows();
+        this.statusBarText =
+            "Execution finished · " + formatBytes(report.freedBytes) + " freed";
+        this.clearSelection();
     }
 
-    rebuildRows() {
-        const sorted = this._entries.slice().sort((a, b) => {
-            const dir = this.sortDir === "asc" ? 1 : -1;
-            if (this.sortKey === "bytes") return (a.bytes - b.bytes) * dir;
-            const av = String(a[this.sortKey] || "");
-            const bv = String(b[this.sortKey] || "");
-            return av.localeCompare(bv) * dir;
+    applyTempClean(report) {
+        this.settleNote();
+        this.planOpen = false;
+        this.resultsOpen = true;
+        this.resultTitle = "Temp cleanup finished";
+        this.resultMeta =
+            "Deleted " + formatCount(report.deletedFiles, "file") + " · " + formatBytes(report.freedBytes) + " freed";
+        this.resultRows = (report.items || []).map((item, index) => ({
+            id: "tmp-" + index,
+            key: String(item.path || ""),
+            value: String(item.status || "") + (item.reason ? " · " + item.reason : "") + " · " + formatBytes(item.bytes),
+            tone: item.status === "deleted" ? "removable" : "skipped",
+        }));
+        this.statusBarText = "Temp cleanup finished · " + formatBytes(report.freedBytes) + " freed";
+        this.clearSelection();
+    }
+
+    applyBuildRootClean(report) {
+        this.settleNote();
+        this.planOpen = false;
+        this.resultsOpen = true;
+        this.resultTitle = "Build roots removed";
+        this.resultMeta =
+            formatCount(report.deletedDirs, "directory") + " · " + formatBytes(report.freedBytes) + " freed";
+        this.resultRows = (report.items || []).map((item, index) => ({
+            id: "br-" + index,
+            key: String(item.path || ""),
+            value: String(item.status || "") + " · " + formatBytes(item.bytes) + " · " + formatCount(item.files, "file"),
+            tone: String(item.status || "").indexOf("deleted") === 0 ? "removable" : "skipped",
+        }));
+        this.statusBarText = "Build roots removed · " + formatBytes(report.freedBytes) + " freed";
+        this.clearSelection();
+    }
+
+    acceptCandidates(rows) {
+        this.raw = rows;
+        this.statusText = "";
+        this.refreshRows();
+        this.recalcSelection();
+        const first = this.rows.length ? this.rows[0] : null;
+        if (first) this.activateRow(first.id);
+        else this.clearFocused();
+    }
+
+    refreshRows() {
+        const needle = String(this.filter || "").trim().toLowerCase();
+        let rows = this.raw.filter((row) => {
+            if (!needle) return true;
+            return (String(row.path || "") + " " + String(row.name || "")).toLowerCase().indexOf(needle) >= 0;
         });
-        this.rows = sorted.map((entry) => ({
-            id: entry.id,
-            cells: [entry.kind, this.formatBytes(entry.bytes), entry.path],
-        }));
+        const dir = this.sortDir === "asc" ? 1 : -1;
+        const key = this.sortKey;
+        rows.sort((left, right) => {
+            if (key === "name") {
+                return left.name.localeCompare(right.name) * dir;
+            }
+            return (left.bytes - right.bytes) * dir;
+        });
+        this.rows = rows;
+        if (this.rows.length && !this.focusedPath) this.activateRow(this.rows[0].id);
     }
 
     sortBy(key) {
         if (this.sortKey === key) {
-            this.sortDir = this.sortDir === "asc" ? "desc" : "asc";
+            this.sortDir = this.sortDir === "desc" ? "asc" : "desc";
         } else {
             this.sortKey = key;
-            this.sortDir = key === "bytes" ? "desc" : "asc";
+            this.sortDir = "desc";
         }
-        this.rebuildRows();
+        this.refreshRows();
     }
 
-    applyTempPlan(report) {
-        this.tempPlan = report;
-        this.tempPlanExists = true;
-        this.tempExecuteDisabled = false;
-        this.tempCandidatesText = `${Number(report.candidateFiles) || 0} files · ${this.formatBytes(Number(report.candidateBytes) || 0)}`;
-        this.tempScannedText = `${Number(report.scannedFiles) || 0} files · ${this.formatBytes(Number(report.scannedBytes) || 0)}`;
-        this.tempRootText = String(report.root || "—");
-        this.ageRows = this.groupRows(report.ageGroups, Number(report.candidateBytes) || 0);
-        this.extRows = this.groupRows(report.extensionGroups, Number(report.candidateBytes) || 0);
-        this.skipRows = this.skipModel(report.skipped || {});
-        const probe = report.cwdProbe || {};
-        this.tempProbeText = `Process paths: ${Number(probe.resolved) || 0}/${Number(probe.processes) || 0} resolved, ${Number(probe.failed) || 0} unreadable. Shielded in-root directories: ${Number(probe.tempDirs) || 0} process temp, ${Number(probe.programDirs) || 0} program image.`;
-        this.tempWarnings = this.joinWarnings(report.warnings);
-        const samples = Array.isArray(report.samples) ? report.samples : [];
-        this.sampleRows = samples.map((item, index) => ({
-            id: `sample-${index}`,
-            cells: [String(item.path || ""), `${Number(item.ageDays) || 0} d`, this.formatBytes(Number(item.bytes) || 0)],
-        }));
-        this.tempSamplesNote = report.samplesTruncated ? `Largest ${samples.length} of ${Number(report.candidateFiles) || 0} candidates are shown.` : `${samples.length} largest candidate(s).`;
+    activateRow(id) {
+        const row = this.findRow(id);
+        if (!row) return;
+        this.focusedId = id;
+        this.focusedPath = row.path;
+        this.focusedKind = row.kind;
+        this.focusedSize = row.sizeText;
+        this.focusedShare = "—";
+        this.focusedReason = row.reasonText;
+        this.focusedAction = row.actionText;
+        this.focusedSafety = row.safety;
+        this.focusedEvidence = row.evidence;
+        this.focusedNote = row.skipReason
+            ? "Skip reason: " + row.skipReason
+            : row.note || "";
     }
 
-    applyTempResult(report) {
-        this.tempResultExists = true;
-        this.tempDeletedText = `${Number(report.deletedFiles) || 0} / ${Number(report.candidateFiles) || 0} files`;
-        this.tempFreedText = this.formatBytes(Number(report.freedBytes) || 0);
-        const skipped = report.skipped || {};
-        const failureCount = Array.isArray(report.failures) ? report.failures.length : 0;
-        this.tempSkippedText = `${Number(skipped.inUse) || 0} in use · ${failureCount} failed`;
-        this.tempResultWarnings = this.joinWarnings(report.warnings);
-        this.tempItemRows = this.itemRows(report.items);
-        this.status = `Execution finished: ${Number(report.deletedFiles) || 0} deleted, ${this.formatBytes(Number(report.freedBytes) || 0)} freed, ${failureCount} failed.`;
-    }
-
-    applyRootsPlan(report) {
-        this.rootsPlanExists = true;
-        this.rootsConfigText = String(report.configPath || "—");
-        const entries = Array.isArray(report.entries) ? report.entries : [];
-        const removable = entries.filter((entry) => Boolean(entry.removable));
-        this._removableRoots = removable.map((entry) => String(entry.path || ""));
-        this.rootsExecuteDisabled = !this._removableRoots.length;
-        this.rootsDeclaredText = `${entries.length} entries · ${this.formatBytes(Number(report.totalBytes) || 0)}`;
-        this.rootsRemovableText = `${removable.length} entries · ${this.formatBytes(Number(report.removableBytes) || 0)}`;
-        this.rootsWarnings = this.joinWarnings(report.warnings);
-        this.rootsRows = entries.map((entry, index) => ({
-            id: `root-${index}`,
-            cells: [
-                String(entry.path || ""),
-                String(Number(entry.line) || 0),
-                String(Number(entry.files) || 0),
-                this.formatBytes(Number(entry.bytes) || 0),
-                entry.removable ? `removable (${String(entry.authorization || "")})` : String(entry.skipReason || "skipped"),
-            ],
-        }));
-        if (!report.configExists) {
-            this.error = "The build-root config file does not exist. Declare absolute paths in the config before planning.";
-            this.status = "";
+    findRow(id) {
+        for (const row of this.raw) {
+            if (row.id === id) return row;
         }
+        return null;
     }
 
-    applyRootsResult(report) {
-        this.rootsResultExists = true;
-        this.rootsDeletedText = String(Number(report.deletedDirs) || 0);
-        this.rootsFreedText = this.formatBytes(Number(report.freedBytes) || 0);
-        this.rootsResultConfigText = String(report.configPath || "—");
-        this.rootsResultWarnings = this.joinWarnings(report.warnings);
-        const items = Array.isArray(report.items) ? report.items : [];
-        this.rootsItemRows = items.map((item, index) => ({
-            id: `root-item-${index}`,
-            cells: [
-                String(item.path || ""),
-                String(Number(item.line) || 0),
-                String(Number(item.files) || 0),
-                this.formatBytes(Number(item.bytes) || 0),
-                String(item.status || ""),
-                String(item.reason || "—"),
-            ],
+    toggleRow(id) {
+        const row = this.findRow(id);
+        if (!row || !row.selectable) return;
+        row.selected = !row.selected;
+        if (this.planOpen) this.closePlan();
+        this.refreshRows();
+        this.recalcSelection();
+        this.activateRow(id);
+    }
+
+    clearFocused() {
+        this.focusedId = "";
+        this.focusedPath = "";
+        this.focusedKind = "";
+        this.focusedSize = "";
+        this.focusedShare = "";
+        this.focusedReason = "";
+        this.focusedAction = "";
+        this.focusedSafety = "";
+        this.focusedEvidence = "";
+        this.focusedNote = "";
+    }
+
+    clearSelection() {
+        for (const row of this.raw) row.selected = false;
+        this.refreshRows();
+        this.recalcSelection();
+    }
+
+    recalcSelection() {
+        let count = 0;
+        let bytes = 0;
+        for (const row of this.raw) {
+            if (row.selected) {
+                count += 1;
+                bytes += row.bytes;
+            }
+        }
+        this.selectedCount = count;
+        this.selectedBytes = bytes;
+
+        if (this.domain === "temp") {
+            this.selectionCountText = formatCount(this.planTempFiles || 0, "candidate");
+            this.selectionBytesText = formatBytes(this.planTempBytes || 0);
+            this.selectionModeText = "Older than " + this.tempOlderThanDays + " days · whole plan";
+        } else if (this.domain === "disk") {
+            this.selectionCountText = "Read-only board";
+            this.selectionBytesText = formatBytes(this.boardTotal);
+            this.selectionModeText = "The disk scan deletes nothing";
+        } else if (this.domain === "registry" || this.domain === "envPath" || this.domain === "software") {
+            this.selectionCountText = formatCount(this.raw.length, "finding");
+            this.selectionBytesText = "";
+            this.selectionModeText = "Review only — no execution path in this workbench yet";
+        } else {
+            this.selectionCountText = count === 0 ? "No selection" : formatCount(count, "item");
+            this.selectionBytesText = count === 0 ? "" : formatBytes(bytes);
+            this.selectionModeText =
+                (this.domain === "dev" ? (this.mode === "trash" ? "Recycle bin" : "Permanent delete") : "Delete directories");
+        }
+
+        const executable = this.domain === "dev" || this.domain === "buildRoots";
+        const planCapable = executable || this.domain === "temp";
+        this.reviewDisabled = this.busy || !planCapable || (executable && count === 0);
+        this.executeDisabled = this.busy || !this.planOpen || (executable && count === 0);
+        this.clearDisabled = this.busy || count === 0;
+        this.executeLabel = this.domain === "dev" ? (this.mode === "trash" ? "Delete to recycle bin" : "Delete permanently") : "Delete";
+    }
+
+    openPlan() {
+        if (this.reviewDisabled) return;
+        this.resultsOpen = false;
+        this.planOpen = true;
+        this.planWarning = "";
+        this.recalcSelection();
+        if (this.domain === "dev") {
+            this.planTitle = "Plan: " + formatCount(this.selectedCount, "artifact");
+            this.planMeta =
+                formatBytes(this.selectedBytes) + " · " +
+                (this.mode === "trash" ? "recycle bin" : "permanent deletion") + " · revalidated at deletion";
+            this.planRows = this.selectedRows().map((row, index) => ({
+                id: "plan-" + index,
+                key: row.path,
+                value: row.sizeText + " · " + row.reasonText,
+                tone: row.tone,
+            }));
+            return;
+        }
+        if (this.domain === "buildRoots") {
+            this.planTitle = "Plan: " + formatCount(this.selectedCount, "directory");
+            this.planMeta = formatBytes(this.selectedBytes) + " · declared build roots";
+            this.planRows = this.selectedRows().map((row, index) => ({
+                id: "plan-" + index,
+                key: row.path,
+                value: row.sizeText + " · " + row.reasonText,
+                tone: row.tone,
+            }));
+            return;
+        }
+        this.planTitle = "Plan: " + formatCount(this.planTempFiles || 0, "candidate");
+        this.planMeta =
+            formatBytes(this.planTempBytes || 0) + " · older than " + this.tempOlderThanDays + " days · " + this.tempRoot;
+        this.planRows = this.raw.map((row, index) => ({
+            id: "plan-" + index,
+            key: row.path,
+            value: row.sizeText + " · " + row.reasonText,
+            tone: row.tone,
         }));
-        this._removableRoots = [];
-        this.rootsExecuteDisabled = true;
-        this.rootsPlanExists = false;
-        this.status = `Build roots finished: ${Number(report.deletedDirs) || 0} deleted, ${this.formatBytes(Number(report.freedBytes) || 0)} freed.`;
+        this.planWarning = "The plan covers every candidate; per-file selection is not offered for temp scans.";
     }
 
-    groupRows(groups, totalBytes) {
-        const list = Array.isArray(groups) ? groups : [];
-        return list.map((group, index) => ({
-            id: `group-${index}`,
-            cells: [
-                String(group.label || ""),
-                String(Number(group.files) || 0),
-                this.formatBytes(Number(group.bytes) || 0),
-                this.share(Number(group.bytes) || 0, totalBytes),
-            ],
-        }));
+    selectedRows() {
+        return this.raw.filter((row) => row.selected);
     }
 
-    skipModel(skipped) {
-        return SKIP_REASONS.map((entry, index) => ({
-            id: `skip-${index}`,
-            cells: [entry[1], String(Number(skipped[entry[0]]) || 0)],
-        }));
+    closePlan() {
+        this.planOpen = false;
+        this.recalcSelection();
     }
 
-    itemRows(items) {
-        const list = Array.isArray(items) ? items : [];
-        const rank = { failed: 0, skipped: 1, deleted: 2 };
-        const sorted = list.slice().sort((a, b) => {
-            const left = rank[a.status] === undefined ? 3 : rank[a.status];
-            const right = rank[b.status] === undefined ? 3 : rank[b.status];
-            if (left !== right) return left - right;
-            return (Number(b.bytes) || 0) - (Number(a.bytes) || 0);
+    closeResults() {
+        this.resultsOpen = false;
+    }
+
+    execute() {
+        if (this.executeDisabled) return;
+        this.busy = true;
+        this.statusText = "Deleting…";
+        this.statusBarText = "Deleting…";
+        this.planOpen = false;
+        this.recalcSelection();
+        if (this.domain === "dev") {
+            this.post("devClean", {
+                options: {
+                    targets: this.selectedRows().map((row) => ({ path: row.path, baseline: row.baseline })),
+                    mode: this.mode,
+                    confirm: true,
+                },
+            });
+            return;
+        }
+        if (this.domain === "buildRoots") {
+            this.post("buildRootClean", {
+                options: {
+                    config: this.buildConfig || null,
+                    paths: this.selectedRows().map((row) => row.path),
+                    confirm: true,
+                },
+            });
+            return;
+        }
+        this.post("tempClean", {
+            options: {
+                root: this.tempRoot || null,
+                olderThanDays: this.tempOlderThanDays,
+                cutoffUnixMs: this.tempCutoffMs,
+                confirm: true,
+            },
         });
-        const shown = sorted.slice(0, ITEM_DISPLAY_LIMIT);
-        this.tempItemNote = sorted.length > ITEM_DISPLAY_LIMIT
-            ? `Showing the first ${ITEM_DISPLAY_LIMIT} of ${sorted.length} file outcomes. Failures and skips are listed first.`
-            : `${sorted.length} file outcome(s).`;
-        return shown.map((item, index) => ({
-            id: `item-${index}`,
-            cells: [
-                String(item.status || ""),
-                this.formatBytes(Number(item.bytes) || 0),
-                String(item.reason || "—"),
-                String(item.path || ""),
-            ],
-        }));
-    }
-
-    joinWarnings(warnings) {
-        const list = Array.isArray(warnings) ? warnings : [];
-        return list.length ? list.join("\n") : "";
-    }
-
-    share(bytes, total) {
-        if (!total) return "—";
-        return `${((bytes / total) * 100).toFixed(1)}%`;
-    }
-
-    formatBytes(n) {
-        if (n < 1024) return `${n} B`;
-        if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
-        if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-        return `${(n / 1024 ** 3).toFixed(2)} GB`;
     }
 }
 </script>
