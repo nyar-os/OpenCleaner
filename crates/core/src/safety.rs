@@ -22,8 +22,50 @@ use crate::{
 const PROTECTED_COMPONENTS: &[&str] =
     &["windows", "program files", "program files (x86)", "programdata", "system volume information", "$recycle.bin", "$mft", "$extend"];
 
-/// Days used when a caller does not choose a threshold.
+/// Days used when a caller does not choose a threshold for file age.
 pub(crate) const DEFAULT_AGE_DAYS: u64 = 7;
+
+/// Length of one day in milliseconds. Defined once so every age and freshness
+/// computation compares the same unit.
+pub(crate) const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Window that decides whether a directory is still receiving writes. One
+/// definition shared by every rule that needs directory freshness; a directory
+/// with a newer direct entry is treated as active.
+pub(crate) const FRESHNESS_DAYS: u64 = 30;
+
+pub(crate) fn freshness_window_ms() -> u64 {
+    FRESHNESS_DAYS * DAY_MS
+}
+
+/// True when a timestamp lies inside the freshness window ending at `now_ms`.
+pub(crate) fn is_fresh(stamp_unix_ms: u64, now_ms: u64) -> bool {
+    stamp_unix_ms.saturating_add(freshness_window_ms()) > now_ms
+}
+
+/// Newest modification time among the direct entries of a directory. Reparse
+/// points are ignored rather than followed, and an unreadable directory has no
+/// timestamp at all.
+pub(crate) fn newest_entry_unix_ms(path: &Path) -> Option<u64> {
+    let read = std::fs::read_dir(path).ok()?;
+    let mut newest: Option<u64> = None;
+    for entry in read.flatten() {
+        let Ok(meta) = entry.metadata()
+        else {
+            continue;
+        };
+        if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
+            continue;
+        }
+        let Some(stamp) =
+            meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|elapsed| elapsed.as_millis() as u64)
+        else {
+            continue;
+        };
+        newest = Some(newest.map_or(stamp, |current| current.max(stamp)));
+    }
+    newest
+}
 
 /// A directory is considered still being written when its newest file is
 /// younger than this. Build tools keep their outputs warm for a while.

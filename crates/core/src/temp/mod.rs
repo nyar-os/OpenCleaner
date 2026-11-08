@@ -169,7 +169,7 @@ fn resolve_root(root: Option<&str>) -> PathBuf {
 }
 
 fn age_days(cutoff_ms: u64, threshold_ms: u64, modified_ms: u64) -> u64 {
-    cutoff_ms.saturating_sub(modified_ms).max(threshold_ms) / (24 * 60 * 60 * 1000)
+    cutoff_ms.saturating_sub(modified_ms).max(threshold_ms) / safety::DAY_MS
 }
 
 fn modified_unix_ms(meta: &std::fs::Metadata) -> Option<u64> {
@@ -194,35 +194,23 @@ struct DirState {
     project_root: bool,
 }
 
-fn inspect_dir(dir: &Path, cutoff_ms: u64, threshold_ms: u64) -> DirState {
+fn inspect_dir(dir: &Path, cutoff_ms: u64) -> DirState {
     let mut state = DirState::default();
     let Ok(read) = std::fs::read_dir(dir)
     else {
         return state;
     };
     for entry in read.flatten() {
-        if state.newest_entry_recent && state.project_root {
-            break;
-        }
         let Ok(meta) = entry.metadata()
         else {
             continue;
         };
-        if !state.project_root && meta.is_file() && rules::ManifestKind::from_os_name(&entry.file_name()).is_some() {
+        if meta.is_file() && rules::ManifestKind::from_os_name(&entry.file_name()).is_some() {
             state.project_root = true;
-        }
-        if state.newest_entry_recent {
-            continue;
-        }
-        if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
-            continue;
-        }
-        if let Some(modified_ms) = modified_unix_ms(&meta)
-            && modified_ms.saturating_add(threshold_ms) > cutoff_ms
-        {
-            state.newest_entry_recent = true;
+            break;
         }
     }
+    state.newest_entry_recent = safety::newest_entry_unix_ms(dir).map(|stamp| safety::is_fresh(stamp, cutoff_ms)).unwrap_or(false);
     state
 }
 
@@ -274,12 +262,12 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
         ));
     }
 
-    let threshold_ms = threshold_days_value * 24 * 60 * 60 * 1000;
+    let threshold_ms = threshold_days_value * safety::DAY_MS;
     let build_roots = declared_build_roots(&mut output.warnings);
     let mut stack = vec![(root.to_path_buf(), false)];
     while let Some((dir, dir_recent)) = stack.pop() {
         let is_root = safety::path_key(&dir) == safety::path_key(root);
-        let state = if is_root { DirState::default() } else { inspect_dir(&dir, cutoff_ms, threshold_ms) };
+        let state = if is_root { DirState::default() } else { inspect_dir(&dir, cutoff_ms) };
         if state.project_root {
             output.skipped.dev_root += 1;
             continue;
@@ -478,7 +466,7 @@ pub fn temp_clean(options: TempCleanOptions) -> Result<TempCleanReport> {
     let older_than_days = threshold_days(options.older_than_days);
     let cutoff_ms = options.cutoff_unix_ms.ok_or_else(|| Error::Message("temp-clean: cutoff_unix_ms is required".to_string()))?;
     let cutoff_ms = cutoff_ms.min(safety::now_unix_ms());
-    let threshold_ms = older_than_days * 24 * 60 * 60 * 1000;
+    let threshold_ms = older_than_days * safety::DAY_MS;
     let scanned = walk(&root, older_than_days, cutoff_ms)?;
     let warnings = scanned.warnings;
 
@@ -623,7 +611,7 @@ mod tests {
     #[test]
     fn stale_file_in_a_directory_with_newer_content_is_skipped() {
         let root = unique_root("temp-dir-recent");
-        write_file(&root.join("active").join("stale.bin"), 1024, 30);
+        write_file(&root.join("active").join("stale.bin"), 1024, 60);
         write_file(&root.join("active").join("fresh.log"), 512, 0);
         let report =
             temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
@@ -635,7 +623,7 @@ mod tests {
     #[test]
     fn stale_directory_without_newer_content_stays_a_candidate() {
         let root = unique_root("temp-dir-idle");
-        write_file(&root.join("idle").join("stale.bin"), 1024, 30);
+        write_file(&root.join("idle").join("stale.bin"), 1024, 60);
         let report =
             temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
         assert_eq!(report.candidate_files, 1);
@@ -647,7 +635,7 @@ mod tests {
     fn nested_stale_file_under_an_active_ancestor_is_skipped() {
         let root = unique_root("temp-dir-nested");
         write_file(&root.join("active").join("fresh.log"), 512, 0);
-        write_file(&root.join("active").join("nested").join("stale.bin"), 1024, 30);
+        write_file(&root.join("active").join("nested").join("stale.bin"), 1024, 60);
         let report =
             temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
         assert_eq!(report.candidate_files, 0);
@@ -658,9 +646,9 @@ mod tests {
     #[test]
     fn project_anchor_directory_is_excluded() {
         let root = unique_root("temp-dev-root");
-        write_file(&root.join("project").join("stale.bin"), 1024, 30);
-        write_file(&root.join("project").join("package.json"), 8, 30);
-        write_file(&root.join("plain").join("stale.bin"), 1024, 30);
+        write_file(&root.join("project").join("stale.bin"), 1024, 60);
+        write_file(&root.join("project").join("package.json"), 8, 60);
+        write_file(&root.join("plain").join("stale.bin"), 1024, 60);
         let report =
             temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
         assert_eq!(report.candidate_files, 1);
