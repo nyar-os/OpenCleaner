@@ -205,21 +205,42 @@ pub fn is_protected(path: &Path) -> bool {
 }
 
 /// Components that mark a path as installed software rather than a user
-/// project. Programs ship their own `node_modules` and `dist`, and editor
-/// extensions use the same layout, so a manifest anchor found there describes a
-/// product the user cannot rebuild.
-const INSTALL_COMPONENTS: &[&str] = &["program files", "program files (x86)", "programdata", "windows", "extensions"];
+/// project. Programs ship their own `node_modules` and `dist`, so a manifest
+/// anchor found there describes a product the user cannot rebuild.
+const INSTALL_COMPONENTS: &[&str] = &["program files", "program files (x86)", "programdata", "windows"];
+
+/// Editor extension trees live at `<dot-directory>\extensions`, such as
+/// `.vscode\extensions` or `.vscode-server\extensions`. Only that pair marks a
+/// shipped extension: a plain source folder named `extensions` is an ordinary
+/// project directory whose artifacts stay candidates.
+fn is_extension_tree(path: &Path) -> bool {
+    let mut inside_dot_directory = false;
+    for component in path.components() {
+        let Component::Normal(name) = component
+        else {
+            inside_dot_directory = false;
+            continue;
+        };
+        let lower = name.to_string_lossy().to_ascii_lowercase();
+        if inside_dot_directory && lower == "extensions" {
+            return true;
+        }
+        inside_dot_directory = lower.len() > 1 && lower.starts_with('.');
+    }
+    false
+}
 
 /// True when a path belongs to an installed program, an editor extension or a
 /// per-user program directory. Such a tree is never a dev candidate.
 pub fn is_installed_program_path(path: &Path) -> bool {
-    let protected = path.components().any(|component| match component {
-        Component::Normal(name) => {
-            let lower = name.to_string_lossy().to_ascii_lowercase();
-            INSTALL_COMPONENTS.contains(&lower.as_str())
-        }
-        _ => false,
-    });
+    let protected = is_extension_tree(path)
+        || path.components().any(|component| match component {
+            Component::Normal(name) => {
+                let lower = name.to_string_lossy().to_ascii_lowercase();
+                INSTALL_COMPONENTS.contains(&lower.as_str())
+            }
+            _ => false,
+        });
     if protected {
         return true;
     }
@@ -400,7 +421,12 @@ mod tests {
         assert!(is_installed_program_path(Path::new(r"C:\Program Files (x86)\Vendor\Product\resources\app\node_modules")));
         assert!(is_installed_program_path(Path::new(r"C:\ProgramData\Vendor\Product\dist")));
         assert!(is_installed_program_path(Path::new(r"C:\Users\me\.editor\extensions\publisher.name-1.0.0\dist")));
+        assert!(is_installed_program_path(Path::new(r"C:\Users\me\.vscode\extensions\publisher.name-1.0.0\node_modules")));
         assert!(!is_installed_program_path(Path::new(r"C:\work\project\dist")));
+        // A source folder that happens to be called `extensions` is not an
+        // editor extension tree, so its artifacts must stay candidates.
+        assert!(!is_installed_program_path(Path::new(r"C:\work\extensions\my-extension\node_modules")));
+        assert!(!is_installed_program_path(Path::new(r"D:\repos\extensions\web\dist")));
     }
 
     #[test]

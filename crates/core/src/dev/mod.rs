@@ -1290,6 +1290,29 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// A source tree under a folder that happens to be named `extensions` is an
+    /// ordinary project, not an editor extension installation. Excluding it
+    /// would silently hide real artifacts.
+    #[test]
+    fn a_source_folder_named_extensions_is_not_an_install_tree() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("extensions-source");
+
+        touch(&root.join("extensions").join("my-extension").join("package.json"), 16);
+        touch(&root.join("extensions").join("my-extension").join("node_modules").join("dep").join("index.js"), 1024);
+
+        let report = dev_scan_with(
+            DevScanOptions { roots: vec![root.display().to_string()], include_global: false, max_depth: None, limit: None },
+            &base(&root),
+        )
+        .unwrap();
+
+        let modules = root.join("extensions").join("my-extension").join("node_modules").display().to_string();
+        assert!(report.artifacts.iter().any(|artifact| artifact.path == modules), "{:?}", report.artifacts);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn global_caches_require_an_anchor_and_the_opt_in() {
         let _guard = FIXTURE_LOCK.lock().unwrap();
