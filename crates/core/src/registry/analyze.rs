@@ -76,7 +76,7 @@ fn is_startup_key(upper: &str) -> bool {
 /// as `MsiExec.exe`, a value without an extension or an unexpanded `%1` is
 /// resolved by the shell through `PATH` and its own lookup rules, so a failed
 /// path check says nothing about whether the target is gone.
-fn absolute_target(text: &str) -> Option<String> {
+pub(crate) fn absolute_target(text: &str) -> Option<String> {
     let text = text.trim();
     let bytes = text.as_bytes();
     let absolute = match bytes {

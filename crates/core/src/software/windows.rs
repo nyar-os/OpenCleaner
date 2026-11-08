@@ -30,7 +30,16 @@ pub(super) fn scan(options: SoftwareOptions) -> Result<SoftwareReport> {
     };
     let dir_size = |path: &str| size_of(Path::new(path));
     let env = |name: &str| std::env::var(name).ok();
-    let ctx = SoftwareContext { dir_exists: &dir_exists, file_exists: &file_exists, list_dir: &list_dir, dir_size: &dir_size, env: &env };
+    let process_image_dirs =
+        || crate::safety::process_paths().image_dirs.iter().map(|dir| dir.to_string_lossy().to_string()).collect::<Vec<String>>();
+    let ctx = SoftwareContext {
+        dir_exists: &dir_exists,
+        file_exists: &file_exists,
+        list_dir: &list_dir,
+        dir_size: &dir_size,
+        env: &env,
+        process_image_dirs: &process_image_dirs,
+    };
 
     let analysis = analyze::analyze(&snapshot, &ctx);
     let mut findings = analysis.findings;
