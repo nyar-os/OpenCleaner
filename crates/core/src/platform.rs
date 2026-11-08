@@ -92,16 +92,23 @@ pub fn capabilities() -> Capabilities {
 fn domain_notes(capabilities: &Capabilities) -> Vec<String> {
     let mut notes = Vec::new();
     if !capabilities.registry_scan {
-        notes.push("registry scanning is unavailable".to_string());
+        notes.push("registry scanning is unavailable on this platform".to_string());
     }
     if !capabilities.registry_clean {
-        notes.push("registry cleaning is not implemented in this build".to_string());
+        // Registry cleaning exists nowhere yet, so on Windows it is a build omission. Where the
+        // registry itself is out of reach the platform gate is the reason that matters.
+        notes.push(if capabilities.registry_scan {
+            "registry cleaning is not implemented in this build".to_string()
+        }
+        else {
+            "registry cleaning is unavailable on this platform".to_string()
+        });
     }
     if !capabilities.env_path_scan || !capabilities.env_path_clean {
-        notes.push("PATH editing is not implemented in this build".to_string());
+        notes.push("PATH editing is unavailable on this platform".to_string());
     }
     if !capabilities.software_scan {
-        notes.push("software residue scanning is not implemented in this build".to_string());
+        notes.push("software residue scanning is unavailable on this platform".to_string());
     }
     if !capabilities.trash {
         notes.push("recycle bin is unavailable in this build, deletions are permanent".to_string());
@@ -253,4 +260,34 @@ pub(crate) fn is_link_like(meta: &Metadata) -> bool {
 #[cfg(not(windows))]
 pub(crate) fn is_link_like(_meta: &Metadata) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_cleaning_note_names_the_reason_that_applies() {
+        let capabilities = capabilities();
+        let note = capabilities
+            .notes
+            .iter()
+            .find(|note| note.contains("registry cleaning"))
+            .expect("registry cleaning is unavailable, so it must carry a note");
+        if capabilities.registry_scan {
+            assert_eq!(note, "registry cleaning is not implemented in this build");
+        }
+        else {
+            assert_eq!(note, "registry cleaning is unavailable on this platform");
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn platform_gated_capabilities_do_not_read_as_build_omissions() {
+        let capabilities = capabilities();
+        for omitted in ["PATH editing is not implemented in this build", "software residue scanning is not implemented in this build"] {
+            assert!(!capabilities.notes.iter().any(|note| note == omitted), "`{omitted}` names the wrong reason for a platform gate");
+        }
+    }
 }
