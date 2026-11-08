@@ -138,7 +138,7 @@ declaration in a plain-text config, one absolute path per line, with `#` comment
   record carries the config path plus every `path`/`line` pair, so a later reviewer can find
   the exact line that allowed the deletion.
 - Every declared root still passes the full gate set: absolute path, an existing directory, not
-  a drive root, no protected component, not a shared platform directory, outside installed
+  a filesystem root, no protected component, not a shared platform directory, outside installed
   software, and not a symbolic link or junction.
 - A root is skipped when a process holds it open or when any file under it changed within the
   last 10 minutes, so the tool never races a running build.

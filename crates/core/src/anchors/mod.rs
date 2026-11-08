@@ -300,9 +300,10 @@ mod tests {
     }
 
     #[test]
-    fn drive_roots_are_rejected_by_evaluation() {
-        let reason = evaluate(Path::new(r"C:\")).unwrap_err();
-        assert!(reason.contains("drive root"), "{reason}");
+    fn volume_roots_are_rejected_by_evaluation() {
+        let root = if cfg!(windows) { Path::new(r"C:\") } else { Path::new("/") };
+        let reason = evaluate(root).unwrap_err();
+        assert!(reason.contains("filesystem root"), "{reason}");
     }
 
     #[test]

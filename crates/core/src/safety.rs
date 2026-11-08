@@ -66,16 +66,16 @@ fn is_volume_root(path: &Path) -> bool {
     if !path.is_absolute() {
         return false;
     }
-    let mut has_prefix = false;
+    let mut rooted = false;
     let mut normal_components = 0usize;
     for component in path.components() {
         match component {
-            Component::Prefix(_) => has_prefix = true,
+            Component::Prefix(_) | Component::RootDir => rooted = true,
             Component::Normal(_) => normal_components += 1,
             _ => {}
         }
     }
-    has_prefix && normal_components == 0
+    rooted && normal_components == 0
 }
 
 fn is_base_dir(path: &Path, dirs: &BaseDirs) -> bool {
@@ -108,7 +108,7 @@ pub(crate) fn ensure_cleanup_root(path: &Path, capability: &'static str) -> Resu
         return Err(Error::Message(format!("{capability}: root is not a directory: {}", path.display())));
     }
     if is_volume_root(path) {
-        return Err(Error::Message(format!("{capability}: a drive root is never used as a cleanup root: {}", path.display())));
+        return Err(Error::Message(format!("{capability}: a filesystem root is never used as a cleanup root: {}", path.display())));
     }
     if has_protected_component(path) {
         return Err(Error::Message(format!("{capability}: root contains a protected component: {}", path.display())));
@@ -433,7 +433,7 @@ pub(crate) fn process_paths() -> ProcessPaths {
         }
         let length = u16::from_ne_bytes([raw[0], raw[1]]) as usize;
         let buffer = usize::from_ne_bytes([raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15]]);
-        if length < 4 || length > 0x8000 {
+        if !(4..=0x8000).contains(&length) {
             return None;
         }
         let text = unsafe { read_wide(handle, buffer, length / 2)? };
@@ -613,10 +613,10 @@ pub(crate) fn process_paths() -> ProcessPaths {
                     result.temp_dirs.push(dir);
                 }
             }
-            if let Some(dir) = unsafe { image_dir_of(process.0) } {
-                if !result.image_dirs.iter().any(|known| path_key(known) == path_key(&dir)) {
-                    result.image_dirs.push(dir);
-                }
+            if let Some(dir) = unsafe { image_dir_of(process.0) }
+                && !result.image_dirs.iter().any(|known| path_key(known) == path_key(&dir))
+            {
+                result.image_dirs.push(dir);
             }
         }
         // SAFETY: same snapshot and entry buffer as the first call.
@@ -633,10 +633,10 @@ pub(crate) fn process_paths() -> ProcessPaths {
     if !result.temp_dirs.iter().any(|known| path_key(known) == path_key(&temp)) {
         result.temp_dirs.push(temp);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            result.image_dirs.push(dir.to_path_buf());
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        result.image_dirs.push(dir.to_path_buf());
     }
     result
 }
@@ -659,6 +659,9 @@ mod tests {
         assert!(!is_within(root, Path::new(r"C:\Users\dev\AppData\Local")));
     }
 
+    /// The protected component names are Windows well-known directories, so the
+    /// guard only has meaning on Windows path grammar.
+    #[cfg(windows)]
     #[test]
     fn install_roots_are_protected_by_component() {
         assert!(has_protected_component(Path::new(r"C:\Program Files\App\node_modules")));
@@ -668,7 +671,8 @@ mod tests {
 
     #[test]
     fn volume_roots_are_rejected() {
-        let error = ensure_cleanup_root(Path::new(r"C:\"), "temp-plan").unwrap_err();
-        assert!(error.to_string().contains("drive root"), "{error}");
+        let root = if cfg!(windows) { Path::new(r"C:\") } else { Path::new("/") };
+        let error = ensure_cleanup_root(root, "temp-plan").unwrap_err();
+        assert!(error.to_string().contains("filesystem root"), "{error}");
     }
 }
