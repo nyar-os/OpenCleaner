@@ -184,6 +184,18 @@ fn is_in_shielded_dir(dir: &Path, shielded: &[PathBuf]) -> bool {
     shielded.iter().any(|entry| safety::is_within(entry, dir))
 }
 
+/// A directory is a project root when a manifest anchor sits directly inside
+/// it. Such a tree is never temp garbage: its files are the project's, and its
+/// `node_modules` or `build` belong to the dev domain, not to file reclamation.
+fn holds_manifest(dir: &Path) -> bool {
+    let Ok(read) = std::fs::read_dir(dir)
+    else {
+        return false;
+    };
+    read.flatten()
+        .any(|entry| entry.metadata().is_ok_and(|meta| meta.is_file()) && rules::ManifestKind::from_os_name(&entry.file_name()).is_some())
+}
+
 /// What one directory says about itself, read from its direct entries only.
 /// A directory count is not a file count: the newest direct entry decides
 /// whether the directory is still being written to, and any manifest name
@@ -199,23 +211,9 @@ struct DirState {
 /// window would both keep a 60-day file protected by a 10-day sibling and hide
 /// an old file behind content the caller already considers stale.
 fn inspect_dir(dir: &Path, cutoff_ms: u64, threshold_ms: u64) -> DirState {
-    let mut state = DirState::default();
-    let Ok(read) = std::fs::read_dir(dir)
-    else {
-        return state;
-    };
-    for entry in read.flatten() {
-        let Ok(meta) = entry.metadata()
-        else {
-            continue;
-        };
-        if meta.is_file() && rules::ManifestKind::from_os_name(&entry.file_name()).is_some() {
-            state.project_root = true;
-            break;
-        }
-    }
-    state.newest_entry_recent = safety::newest_entry_unix_ms(dir).map(|stamp| stamp.saturating_add(threshold_ms) > cutoff_ms).unwrap_or(false);
-    state
+    let project_root = holds_manifest(dir);
+    let newest_entry_recent = safety::newest_entry_unix_ms(dir).map(|stamp| stamp.saturating_add(threshold_ms) > cutoff_ms).unwrap_or(false);
+    DirState { newest_entry_recent, project_root }
 }
 
 fn declared_build_roots(warnings: &mut Vec<String>) -> Vec<PathBuf> {
@@ -233,6 +231,15 @@ fn declared_build_roots(warnings: &mut Vec<String>) -> Vec<PathBuf> {
 }
 
 fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOutput> {
+    // A root that carries an anchor is a project checkout. Its files belong to
+    // the project and its artifacts belong to the dev domain, so it is rejected
+    // instead of being treated as a temp directory full of unrelated files.
+    if holds_manifest(root) {
+        return Err(Error::Message(format!(
+            "temp: root holds a project manifest anchor and is never treated as a temp root: {}",
+            root.display()
+        )));
+    }
     let paths = safety::process_paths();
     let temp_dirs: Vec<PathBuf> = paths
         .temp_dirs
@@ -666,6 +673,20 @@ mod tests {
         assert!(candidates.iter().all(|path| !path.contains("active")), "{candidates:?}");
         assert_eq!(report.skipped.recent, 1);
         assert_eq!(report.skipped.dir_recent, 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A root that is itself a project checkout is rejected: its direct files
+    /// are project files and its subdirectories hold dev artifacts, so no file
+    /// below it may be treated as unrelated temp garbage.
+    #[test]
+    fn a_project_root_is_never_a_temp_root() {
+        let root = unique_root("temp-root-project");
+        write_file(&root.join("package.json"), 8, 60);
+        write_file(&root.join("old.log"), 1024, 60);
+        let error = temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) })
+            .expect_err("a project root must be rejected");
+        assert!(error.to_string().contains("manifest anchor"), "{error}");
         std::fs::remove_dir_all(&root).ok();
     }
 
