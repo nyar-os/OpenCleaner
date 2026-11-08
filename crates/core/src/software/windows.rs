@@ -32,6 +32,7 @@ pub(super) fn scan(options: SoftwareOptions) -> Result<SoftwareReport> {
     let env = |name: &str| std::env::var(name).ok();
     let process_image_dirs =
         || crate::safety::process_paths().image_dirs.iter().map(|dir| dir.to_string_lossy().to_string()).collect::<Vec<String>>();
+    let newest_entry_unix_ms = |path: &str| crate::safety::newest_entry_unix_ms(Path::new(path));
     let ctx = SoftwareContext {
         dir_exists: &dir_exists,
         file_exists: &file_exists,
@@ -39,6 +40,7 @@ pub(super) fn scan(options: SoftwareOptions) -> Result<SoftwareReport> {
         dir_size: &dir_size,
         env: &env,
         process_image_dirs: &process_image_dirs,
+        newest_entry_unix_ms: &newest_entry_unix_ms,
     };
 
     let analysis = analyze::analyze(&snapshot, &ctx);

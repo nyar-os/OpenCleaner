@@ -12,6 +12,8 @@ use crate::registry::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SoftwareKind {
+    /// A leftover product directory whose recorded install path is gone.
+    InstallDirectory,
     /// A leftover configuration or cache directory for an uninstalled product.
     ConfigDirectory,
 }
@@ -19,6 +21,7 @@ pub enum SoftwareKind {
 impl SoftwareKind {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::InstallDirectory => "install-directory",
             Self::ConfigDirectory => "config-directory",
         }
     }
@@ -58,6 +61,8 @@ pub struct SoftwareContext<'a> {
     pub env: &'a dyn Fn(&str) -> Option<String>,
     /// Directories of executable images that running processes are using.
     pub process_image_dirs: &'a dyn Fn() -> Vec<String>,
+    /// Newest modification time among a directory's direct entries.
+    pub newest_entry_unix_ms: &'a dyn Fn(&str) -> Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -181,10 +186,16 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
             continue;
         }
 
-        // An uninstaller or display icon that still exists proves the product is
-        // present. Without this guard, a live install whose uninstall row omits
-        // `InstallLocation` (Steam and some MSI rows do) would look like leftover.
-        if still_installed(&key.values, ctx) {
+        // Directories that carry the product name, used by the presence chain
+        // below. A matching directory alone is never presence evidence.
+        let product = normalize_name(&display_name);
+        let install_matches = install_matches(&install_location, &install_roots, ctx, &product);
+
+        // Presence is one chain for every row: a recorded executable that really
+        // exists, a process image running inside a matching directory, or a
+        // process image directory named after the product. A matching directory
+        // is not evidence by itself, and a single stale install path proves nothing.
+        if still_installed(&key.values, ctx) || runs_from(&product, &install_matches, &(ctx.process_image_dirs)()) {
             analysis.skipped.push(SoftwareSkip {
                 registry_key: key.path.clone(),
                 display_name: Some(display_name),
@@ -193,38 +204,38 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
             continue;
         }
 
-        let product = normalize_name(&display_name);
-        let install_matches = install_matches(&install_location, &install_roots, ctx, &product);
-
-        // Presence comes from the same evidence chain for every row: a recorded
-        // executable that really exists, a product directory that really exists
-        // under an install root, or a running process using one. A single stale
-        // install path is not proof that the product is gone, and neither is an
-        // uninstall command that names no path at all.
-        if still_installed(&key.values, ctx)
-            || !install_matches.is_empty()
-            || runs_from(&product, &install_matches, &(ctx.process_image_dirs)())
-        {
+        let now_ms = crate::safety::now_unix_ms();
+        let mut candidates: Vec<(SoftwareKind, String, String)> = Vec::new();
+        // With the chain empty, freshness separates a live install whose
+        // uninstall row is stale from a directory the product left behind. A
+        // single fresh match proves the product is present, so neither its
+        // install directory nor its configuration folders are leftovers.
+        let fresh_install = install_matches
+            .iter()
+            .any(|(path, _)| (ctx.newest_entry_unix_ms)(path).is_some_and(|stamp| crate::safety::is_fresh(stamp, now_ms)));
+        if fresh_install {
             analysis.skipped.push(SoftwareSkip {
                 registry_key: key.path.clone(),
                 display_name: Some(display_name),
                 reason: "still-installed".to_string(),
             });
             continue;
+        }
+        for (path, rule) in &install_matches {
+            candidates.push((SoftwareKind::InstallDirectory, path.clone(), rule.clone()));
         }
 
         // Configuration and cache leftovers only exist once the app itself is
         // gone, which the evidence above already established.
-        let mut candidates: Vec<(String, String)> = Vec::new();
         for root in &config_roots {
             for child in (ctx.list_dir)(root) {
                 if normalize_name(&child) == product {
-                    candidates.push((join(root, &child), "config-root-exact-name".to_string()));
+                    candidates.push((SoftwareKind::ConfigDirectory, join(root, &child), "config-root-exact-name".to_string()));
                 }
             }
         }
 
-        for (path, rule) in candidates {
+        for (kind, path, rule) in candidates {
             if user_data.iter().any(|root| is_under(&path, root)) {
                 analysis.skipped.push(SoftwareSkip {
                     registry_key: key.path.clone(),
@@ -239,11 +250,29 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
             }
             seen.push(normalized.clone());
 
-            let kind = SoftwareKind::ConfigDirectory;
-            let evidence = format!(
-                "uninstall entry for {display_name} has no install location, no recorded file and no running process, yet {path} matches the product name"
-            );
-            let safety = "the product is uninstalled and this folder is not a user document, desktop, download or picture folder".to_string();
+            let (evidence, safety) = match kind {
+                SoftwareKind::InstallDirectory => {
+                    let recorded = match &install_location {
+                        Some(location) => format!("recorded install path {location} is missing"),
+                        None => "the uninstall entry records no install path".to_string(),
+                    };
+                    let freshness = match (ctx.newest_entry_unix_ms)(&path) {
+                        Some(stamp) => format!("newest entry is {} days old", now_ms.saturating_sub(stamp) / crate::safety::DAY_MS),
+                        None => "the directory holds no entries".to_string(),
+                    };
+                    (
+                        format!("{recorded}, no recorded executable exists, no process runs from {path}, {freshness}"),
+                        "the recorded install folder is gone and nothing runs from this directory, so it cannot be the running product"
+                            .to_string(),
+                    )
+                }
+                SoftwareKind::ConfigDirectory => (
+                    format!(
+                        "uninstall entry for {display_name} has no live install path, no recorded executable exists and no process runs, yet {path} matches the product name"
+                    ),
+                    "the product is uninstalled and this folder is not a user document, desktop, download or picture folder".to_string(),
+                ),
+            };
             analysis.findings.push(SoftwareFinding {
                 id: format!("{}-{normalized}", kind.as_str()),
                 kind,
@@ -325,15 +354,21 @@ fn executable_path(raw: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<St
 
 /// Directories that carry the product name under an install root. They are
 /// installation evidence, not residue: an in-place update or a reinstall leaves
-/// the recorded path stale while the product itself is present.
-fn install_matches(install_location: &Option<String>, install_roots: &[String], ctx: &SoftwareContext<'_>, product: &str) -> Vec<String> {
-    let mut matches = Vec::new();
+/// the recorded path stale while the product itself is present. Each match
+/// carries the rule that produced it so the finding can name its own evidence.
+fn install_matches(
+    install_location: &Option<String>,
+    install_roots: &[String],
+    ctx: &SoftwareContext<'_>,
+    product: &str,
+) -> Vec<(String, String)> {
+    let mut matches: Vec<(String, String)> = Vec::new();
     if let Some(location) = install_location
         && let Some(ancestor) = existing_ancestor(location, ctx)
     {
         for child in (ctx.list_dir)(&ancestor) {
             if normalize_name(&child) == product {
-                matches.push(join(&ancestor, &child));
+                matches.push((join(&ancestor, &child), "missing-install-location-sibling".to_string()));
             }
         }
     }
@@ -341,8 +376,8 @@ fn install_matches(install_location: &Option<String>, install_roots: &[String], 
         for child in (ctx.list_dir)(root) {
             if normalize_name(&child) == product {
                 let path = join(root, &child);
-                if !matches.iter().any(|known| known.eq_ignore_ascii_case(&path)) {
-                    matches.push(path);
+                if !matches.iter().any(|(known, _)| known.eq_ignore_ascii_case(&path)) {
+                    matches.push((path, "standard-install-root".to_string()));
                 }
             }
         }
@@ -352,8 +387,8 @@ fn install_matches(install_location: &Option<String>, install_roots: &[String], 
 
 /// A running process counts as presence when its image directory sits inside a
 /// known product directory or is itself named after the product.
-fn runs_from(product: &str, install_matches: &[String], image_dirs: &[String]) -> bool {
-    image_dirs.iter().any(|dir| install_matches.iter().any(|install| is_under(dir, install)) || last_segment(dir) == product)
+fn runs_from(product: &str, install_matches: &[(String, String)], image_dirs: &[String]) -> bool {
+    image_dirs.iter().any(|dir| install_matches.iter().any(|(install, _)| is_under(dir, install)) || last_segment(dir) == product)
 }
 
 fn last_segment(path: &str) -> String {
@@ -424,6 +459,10 @@ mod tests {
 [HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\RunningApp]
 "DisplayName"="Running App"
 
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OldApp]
+"DisplayName"="Old App"
+"InstallLocation"="C:\\Program Files (x86)\\Old App\\1.0"
+
 [HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NoName]
 "InstallLocation"="C:\\Program Files\\No Name"
 "#;
@@ -435,6 +474,9 @@ mod tests {
         env: BTreeMap<String, String>,
         /// Directories of executable images used by running processes.
         images: Vec<String>,
+        /// Directories whose direct entries were written inside the freshness
+        /// window. Every other directory with entries holds only stale ones.
+        fresh: Vec<String>,
     }
 
     impl Fixture {
@@ -445,6 +487,19 @@ mod tests {
             let dir_size = |_: &str| 4096u64;
             let env = |name: &str| self.env.get(name).cloned();
             let images = || self.images.clone();
+            let newest = |path: &str| {
+                let key = crate::env::analyze::normalize(path);
+                let now = crate::safety::now_unix_ms();
+                if self.fresh.iter().any(|dir| dir == &key) {
+                    Some(now.saturating_sub(crate::safety::freshness_window_ms() / 2))
+                }
+                else if self.children.get(&key).is_some_and(|entries| !entries.is_empty()) {
+                    Some(now.saturating_sub(crate::safety::freshness_window_ms() * 4))
+                }
+                else {
+                    None
+                }
+            };
             let ctx = SoftwareContext {
                 dir_exists: &dir_exists,
                 file_exists: &file_exists,
@@ -452,6 +507,7 @@ mod tests {
                 dir_size: &dir_size,
                 env: &env,
                 process_image_dirs: &images,
+                newest_entry_unix_ms: &newest,
             };
             super::analyze(snapshot, &ctx)
         }
@@ -464,7 +520,8 @@ mod tests {
     fn fixture() -> Fixture {
         let mut children = BTreeMap::new();
         children.insert(normalized(r"C:\Program Files"), vec!["Gone App".to_string(), "Live App".to_string()]);
-        children.insert(normalized(r"C:\Program Files (x86)"), vec!["Steam Like".to_string()]);
+        children.insert(normalized(r"C:\Program Files (x86)"), vec!["Old App".to_string(), "Steam Like".to_string()]);
+        children.insert(normalized(r"C:\Program Files (x86)\Old App"), vec!["bin".to_string()]);
         children.insert(
             normalized(r"C:\ProgramData"),
             vec!["Config App".to_string(), "Ghost App".to_string(), "System App".to_string(), "Patch App".to_string()],
@@ -489,6 +546,8 @@ mod tests {
                 normalized(r"C:\Program Files\Live App"),
                 normalized(r"C:\Program Files\Gone App"),
                 normalized(r"C:\Program Files (x86)"),
+                normalized(r"C:\Program Files (x86)\Old App"),
+                normalized(r"C:\Program Files (x86)\Old App\bin"),
                 normalized(r"C:\Program Files (x86)\Steam Like"),
                 normalized(r"C:\ProgramData"),
                 normalized(r"C:\ProgramData\Config App"),
@@ -508,6 +567,9 @@ mod tests {
             children,
             env,
             images: vec![normalized(r"C:\Users\me\AppData\Local\Programs\Per User App"), normalized(r"C:\Tools\Running App")],
+            // The recorded install path of `Gone App` is gone while its
+            // directory keeps receiving writes, which is a stale uninstall row.
+            fresh: vec![normalized(r"C:\Program Files\Gone App")],
         }
     }
 
@@ -517,15 +579,15 @@ mod tests {
         let fixture = fixture();
         let analysis = fixture.analyze(&snapshot);
 
-        let paths: Vec<&str> = analysis.findings.iter().map(|finding| finding.path.as_str()).collect();
+        let config: Vec<&SoftwareFinding> = analysis.findings.iter().filter(|finding| finding.kind == SoftwareKind::ConfigDirectory).collect();
+        let paths: Vec<&str> = config.iter().map(|finding| finding.path.as_str()).collect();
         assert!(paths.iter().any(|path| path.ends_with(r"ProgramData\Config App")), "{paths:?}");
         assert!(paths.iter().any(|path| path.ends_with(r"AppData\Local\Config App")), "{paths:?}");
-        // A product directory that exists under an install root is the
-        // installation itself, never residue.
+        // A product directory that exists under an install root is only residue
+        // once the presence chain and the freshness check both fail.
         assert!(!paths.iter().any(|path| path.ends_with(r"Program Files\Gone App")), "{paths:?}");
 
-        for finding in &analysis.findings {
-            assert_eq!(finding.kind, SoftwareKind::ConfigDirectory);
+        for finding in &config {
             assert!(!finding.evidence.is_empty(), "{finding:?}");
             assert!(!finding.safety.is_empty(), "{finding:?}");
             assert!(!finding.rule.is_empty(), "{finding:?}");
@@ -533,7 +595,36 @@ mod tests {
             assert_eq!(finding.bytes, 4096);
             assert!(finding.removable);
         }
-        assert_eq!(analysis.uninstall_keys, 10);
+        assert_eq!(analysis.uninstall_keys, 11);
+    }
+
+    /// A product whose recorded `InstallLocation` is gone and whose directory
+    /// still exists under a standard install root, with no recorded executable
+    /// and no process, is real residue: a `standard-install-root` candidate
+    /// whose evidence names every established item.
+    #[test]
+    fn leftover_install_directory_is_a_candidate() {
+        let snapshot = parse_reg(REG_FIXTURE, "fixture.reg");
+        let fixture = fixture();
+        let analysis = fixture.analyze(&snapshot);
+
+        let finding = analysis
+            .findings
+            .iter()
+            .find(|finding| finding.kind == SoftwareKind::InstallDirectory)
+            .unwrap_or_else(|| panic!("{:#?}", analysis.findings));
+        assert!(finding.path.ends_with(r"Program Files (x86)\Old App"), "{finding:?}");
+        assert_eq!(finding.rule, "standard-install-root", "{finding:?}");
+        assert_eq!(finding.display_name, "Old App");
+        assert_eq!(finding.install_location.as_deref(), Some(r"C:\Program Files (x86)\Old App\1.0"));
+        // Each item of the chain is written out, not summarised.
+        assert!(finding.evidence.contains(r"recorded install path C:\Program Files (x86)\Old App\1.0 is missing"), "{finding:?}");
+        assert!(finding.evidence.contains("no recorded executable exists"), "{finding:?}");
+        assert!(finding.evidence.contains(r"no process runs from C:\Program Files (x86)\Old App"), "{finding:?}");
+        assert!(finding.evidence.contains("newest entry is "), "{finding:?}");
+        assert!(finding.evidence.ends_with(" days old"), "{finding:?}");
+        assert!(!finding.safety.is_empty(), "{finding:?}");
+        assert!(analysis.findings.iter().all(|finding| !(finding.kind == SoftwareKind::ConfigDirectory && finding.display_name == "Old App")));
     }
 
     #[test]
@@ -574,6 +665,25 @@ mod tests {
         assert!(!paths.iter().any(|path| path.ends_with(r"AppData\Roaming\Running App")), "{paths:?}");
     }
 
+    /// Reverse of `leftover_install_directory_is_a_candidate`: the recorded
+    /// install path is gone and no executable or process exists, but the
+    /// matching directory still receives writes. This asserts the
+    /// "stale uninstall row" branch: the product counts as still installed, so
+    /// neither the directory nor any configuration folder is offered.
+    #[test]
+    fn recent_writes_in_a_matching_directory_mean_the_product_is_still_installed() {
+        let snapshot = parse_reg(REG_FIXTURE, "fixture.reg");
+        let fixture = fixture();
+        let analysis = fixture.analyze(&snapshot);
+
+        assert!(
+            analysis.skipped.iter().any(|skip| skip.reason == "still-installed" && skip.display_name.as_deref() == Some("Gone App")),
+            "{:#?}",
+            analysis.skipped
+        );
+        assert!(analysis.findings.iter().all(|finding| !finding.path.ends_with(r"Program Files\Gone App")), "{:#?}", analysis.findings);
+    }
+
     #[test]
     fn user_data_directories_are_never_candidates() {
         let snapshot = parse_reg(REG_FIXTURE, "fixture.reg");
@@ -585,7 +695,14 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("LOCALAPPDATA".to_string(), r"C:\Users\me\Documents".to_string());
         env.insert("USERPROFILE".to_string(), r"C:\Users\me".to_string());
-        let fixture = Fixture { dirs: vec![normalized(r"C:\Users\me\Documents")], files: Vec::new(), children, env, images: Vec::new() };
+        let fixture = Fixture {
+            dirs: vec![normalized(r"C:\Users\me\Documents")],
+            files: Vec::new(),
+            children,
+            env,
+            images: Vec::new(),
+            fresh: Vec::new(),
+        };
 
         let analysis = fixture.analyze(&snapshot);
         let paths: Vec<&str> = analysis.findings.iter().map(|finding| finding.path.as_str()).collect();
@@ -606,9 +723,16 @@ mod tests {
     #[test]
     fn empty_install_roots_fall_back_to_no_candidates() {
         let snapshot = parse_reg(REG_FIXTURE, "fixture.reg");
-        let fixture = Fixture { dirs: Vec::new(), files: Vec::new(), children: BTreeMap::new(), env: BTreeMap::new(), images: Vec::new() };
+        let fixture = Fixture {
+            dirs: Vec::new(),
+            files: Vec::new(),
+            children: BTreeMap::new(),
+            env: BTreeMap::new(),
+            images: Vec::new(),
+            fresh: Vec::new(),
+        };
         let analysis = fixture.analyze(&snapshot);
         assert!(analysis.findings.is_empty(), "{:#?}", analysis.findings);
-        assert_eq!(analysis.uninstall_keys, 10);
+        assert_eq!(analysis.uninstall_keys, 11);
     }
 }

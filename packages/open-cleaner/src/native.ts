@@ -286,7 +286,7 @@ export type EnvPathCleanReport = {
     warnings: string[];
 };
 
-export type SoftwareKind = 'config-directory';
+export type SoftwareKind = 'install-directory' | 'config-directory';
 
 export type SoftwareFinding = {
     id: string;
