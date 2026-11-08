@@ -162,7 +162,11 @@ cli.command('scan', 'cli.cmd.scan')
         const limit = numberOption(options, 'limit');
         const report = scan({ root, limit });
         console.log(`root: ${report.root}`);
-        console.log(`total: ${formatBytes(report.totalBytes)}`);
+        console.log(`total: ${formatBytes(report.totalBytes)}${report.unreadableDirs ? ' (lower bound: unreadable subtrees excluded)' : ''}`);
+        if (report.unreadableDirs) {
+            console.log(`unreadable dirs: ${report.unreadableDirs} (skipped, not measured)`);
+            for (const path of report.unreadablePaths) console.log(`  skipped: ${path}`);
+        }
         for (const entry of report.entries) {
             console.log(`${formatBytes(entry.bytes).padStart(10)}  ${entry.kind.padEnd(6)}  ${entry.path}`);
         }

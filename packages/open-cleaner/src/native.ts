@@ -12,6 +12,13 @@ export type ScanEntry = {
 export type ScanReport = {
     root: string;
     totalBytes: number;
+    /**
+     * Directories whose listing was denied. Their subtrees are skipped instead
+     * of failing the scan, and their bytes are not in `totalBytes`.
+     */
+    unreadableDirs: number;
+    /** The denied directory at the top of each skipped subtree. */
+    unreadablePaths: string[];
     scannedAtUnixMs: number;
     entries: ScanEntry[];
 };

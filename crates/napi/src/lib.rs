@@ -159,7 +159,13 @@ fn audited_scan(options: ScanOptions) -> Result<open_cleaner_core::ScanReport> {
     let report = audit::run("scan", Mode::DryRun, params, || {
         let report = scan(options)?;
         let count = report.entries.len() as u64;
-        let summary = format!("root {}, {} entries, {} bytes", report.root, report.entries.len(), report.total_bytes);
+        let summary = format!(
+            "root {}, {} entries, {} bytes, {} unreadable dirs",
+            report.root,
+            report.entries.len(),
+            report.total_bytes,
+            report.unreadable_dirs
+        );
         Ok((report, audit::Summary::new(count, summary)))
     })
     .map_err(core_error)?;
@@ -195,7 +201,14 @@ fn report_to_js(env: Env, report: &open_cleaner_core::ScanReport) -> Result<JsVa
     let obj = env.object()?;
     obj.set_named("root", env.string(&report.root)?)?;
     obj.set_named("totalBytes", env.int64(report.total_bytes as i64)?)?;
+    obj.set_named("unreadableDirs", env.int64(report.unreadable_dirs as i64)?)?;
     obj.set_named("scannedAtUnixMs", env.int64(report.scanned_at_unix_ms as i64)?)?;
+
+    let skipped = env.array_with_length(report.unreadable_paths.len())?;
+    for (i, path) in report.unreadable_paths.iter().enumerate() {
+        skipped.set_element(i as u32, env.string(path)?)?;
+    }
+    obj.set_named("unreadablePaths", skipped)?;
 
     let arr = env.array_with_length(report.entries.len())?;
     for (i, entry) in report.entries.iter().enumerate() {
