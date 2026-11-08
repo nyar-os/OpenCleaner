@@ -74,8 +74,118 @@ pub struct SoftwareAnalysis {
     pub uninstall_keys: usize,
 }
 
+/// Which way the uninstall row's evidence chain resolves. The software domain
+/// and the registry domain both read this one value, so one uninstall key
+/// cannot be "still installed" for one command and an orphan row for another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstallVerdict {
+    /// The row is not a product row: `no-display-name`, `system-component` or
+    /// `update-package`. It is never residue in either domain.
+    NotAProduct(&'static str),
+    /// At least one rung of the chain proves the product is present.
+    Installed,
+    /// No rung proves presence, so the product is gone.
+    Gone,
+}
+
+/// The chain's answer for one uninstall row, with the facts that produced it.
+#[derive(Debug, Clone)]
+pub(crate) struct Installation {
+    pub(crate) display_name: Option<String>,
+    /// Expanded, trimmed install path recorded by the row.
+    pub(crate) install_location: Option<String>,
+    /// Directories carrying the product name under the recorded or a standard
+    /// install root, each with the rule that found it.
+    pub(crate) install_matches: Vec<(String, String)>,
+    pub(crate) verdict: InstallVerdict,
+}
+
+/// Decides whether the product behind one uninstall row is installed. This is
+/// the only evidence chain in the crate: each rung can prove presence (a live
+/// install path, a recorded executable, a running process image, an MSI
+/// registration, a recently written matching directory), and only when every
+/// rung is empty is the product gone. A stale install path by itself proves
+/// nothing, because an in-place update leaves it stale while the product runs.
+pub(crate) fn installation(
+    values: &std::collections::BTreeMap<String, RegistryValue>,
+    install_roots: &[String],
+    ctx: &SoftwareContext<'_>,
+) -> Installation {
+    let mut state = Installation {
+        display_name: value(values, "DisplayName"),
+        install_location: None,
+        install_matches: Vec::new(),
+        verdict: InstallVerdict::Gone,
+    };
+
+    let Some(display_name) = state.display_name.clone()
+    else {
+        state.verdict = InstallVerdict::NotAProduct("no-display-name");
+        return state;
+    };
+    if dword(values, "SystemComponent") == Some(1) {
+        state.verdict = InstallVerdict::NotAProduct("system-component");
+        return state;
+    }
+    if value(values, "ParentKeyName").is_some_and(|parent| !parent.is_empty()) {
+        state.verdict = InstallVerdict::NotAProduct("update-package");
+        return state;
+    }
+    if value(values, "ReleaseType").is_some_and(|kind| {
+        let kind = kind.to_ascii_lowercase();
+        kind.contains("update") || kind.contains("hotfix")
+    }) {
+        state.verdict = InstallVerdict::NotAProduct("update-package");
+        return state;
+    }
+
+    state.install_location = value(values, "InstallLocation")
+        .and_then(|location| expand_env(&location, ctx.env))
+        .map(|location| location.trim().trim_matches('"').trim().to_string())
+        .filter(|location| !location.is_empty());
+
+    // A live install location means the product is still installed.
+    if let Some(location) = &state.install_location
+        && (ctx.dir_exists)(location)
+    {
+        state.verdict = InstallVerdict::Installed;
+        return state;
+    }
+
+    let product = normalize_name(&display_name);
+    state.install_matches = install_matches(&state.install_location, install_roots, ctx, &product);
+
+    // Presence is one chain for every row: a recorded executable that really
+    // exists, a process image running inside a matching directory, or a process
+    // image directory named after the product. A matching directory is not
+    // evidence by itself.
+    if still_installed(values, ctx) || runs_from(&product, &state.install_matches, &(ctx.process_image_dirs)()) {
+        state.verdict = InstallVerdict::Installed;
+        return state;
+    }
+
+    // A row registered with the Windows installer is the product's own
+    // registration, and that key disappears when the product is uninstalled.
+    if installer_registered(values) {
+        state.verdict = InstallVerdict::Installed;
+        return state;
+    }
+
+    // A single fresh match proves the product is present, so the row is a stale
+    // uninstall entry rather than an orphan.
+    let now_ms = crate::safety::now_unix_ms();
+    if state
+        .install_matches
+        .iter()
+        .any(|(path, _)| (ctx.newest_entry_unix_ms)(path).is_some_and(|stamp| crate::safety::is_fresh(stamp, now_ms)))
+    {
+        state.verdict = InstallVerdict::Installed;
+    }
+    state
+}
+
 /// Standard install roots used when the recorded install location is empty.
-fn install_roots(ctx: &SoftwareContext<'_>) -> Vec<String> {
+pub(crate) fn install_roots(ctx: &SoftwareContext<'_>) -> Vec<String> {
     let mut roots = Vec::new();
     for name in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
         let Some(value) = (ctx.env)(name)
@@ -135,102 +245,22 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
         }
         analysis.uninstall_keys += 1;
 
-        let display_name = value(&key.values, "DisplayName");
-        let Some(display_name) = display_name
+        let state = installation(&key.values, &install_roots, ctx);
+        let Some(display_name) = state.display_name.clone()
         else {
             analysis.skipped.push(SoftwareSkip { registry_key: key.path.clone(), display_name: None, reason: "no-display-name".to_string() });
             continue;
         };
-        if dword(&key.values, "SystemComponent") == Some(1) {
-            analysis.skipped.push(SoftwareSkip {
-                registry_key: key.path.clone(),
-                display_name: Some(display_name),
-                reason: "system-component".to_string(),
-            });
-            continue;
-        }
-        if value(&key.values, "ParentKeyName").is_some_and(|parent| !parent.is_empty()) {
-            analysis.skipped.push(SoftwareSkip {
-                registry_key: key.path.clone(),
-                display_name: Some(display_name),
-                reason: "update-package".to_string(),
-            });
-            continue;
-        }
-        if value(&key.values, "ReleaseType").is_some_and(|kind| {
-            let kind = kind.to_ascii_lowercase();
-            kind.contains("update") || kind.contains("hotfix")
-        }) {
-            analysis.skipped.push(SoftwareSkip {
-                registry_key: key.path.clone(),
-                display_name: Some(display_name),
-                reason: "update-package".to_string(),
-            });
-            continue;
-        }
-
-        let install_location = value(&key.values, "InstallLocation").and_then(|location| expand_env(&location, ctx.env));
-        let install_location =
-            install_location.map(|location| location.trim().trim_matches('"').trim().to_string()).filter(|location| !location.is_empty());
-
-        // A live install location means the product is still installed: never a
-        // cleanup candidate.
-        if let Some(location) = &install_location
-            && (ctx.dir_exists)(location)
-        {
-            analysis.skipped.push(SoftwareSkip {
-                registry_key: key.path.clone(),
-                display_name: Some(display_name),
-                reason: "still-installed".to_string(),
-            });
-            continue;
-        }
-
-        // Directories that carry the product name, used by the presence chain
-        // below. A matching directory alone is never presence evidence.
-        let product = normalize_name(&display_name);
-        let install_matches = install_matches(&install_location, &install_roots, ctx, &product);
-
-        // Presence is one chain for every row: a recorded executable that really
-        // exists, a process image running inside a matching directory, or a
-        // process image directory named after the product. A matching directory
-        // is not evidence by itself, and a single stale install path proves nothing.
-        if still_installed(&key.values, ctx) || runs_from(&product, &install_matches, &(ctx.process_image_dirs)()) {
-            analysis.skipped.push(SoftwareSkip {
-                registry_key: key.path.clone(),
-                display_name: Some(display_name),
-                reason: "still-installed".to_string(),
-            });
-            continue;
-        }
-
-        let now_ms = crate::safety::now_unix_ms();
-        let mut candidates: Vec<(SoftwareKind, String, String)> = Vec::new();
-
-        // A row registered with the Windows installer is the product's own
-        // registration, and that key disappears when the product is uninstalled.
-        // Its file system state therefore never establishes install residue.
-        if installer_registered(&key.values) {
-            analysis.skipped.push(SoftwareSkip {
-                registry_key: key.path.clone(),
-                display_name: Some(display_name),
-                reason: "still-installed".to_string(),
-            });
-            continue;
-        }
-
-        // Install residue needs a recorded install path that no longer exists.
-        // A row without one has no path to invalidate, so a same-named directory
-        // is never install residue for it.
-        if install_location.is_some() {
-            // With the chain empty, freshness separates a live install whose
-            // uninstall row is stale from a directory the product left behind. A
-            // single fresh match proves the product is present, so neither its
-            // install directory nor its configuration folders are leftovers.
-            let fresh_install = install_matches
-                .iter()
-                .any(|(path, _)| (ctx.newest_entry_unix_ms)(path).is_some_and(|stamp| crate::safety::is_fresh(stamp, now_ms)));
-            if fresh_install {
+        match state.verdict {
+            InstallVerdict::NotAProduct(reason) => {
+                analysis.skipped.push(SoftwareSkip {
+                    registry_key: key.path.clone(),
+                    display_name: Some(display_name),
+                    reason: reason.to_string(),
+                });
+                continue;
+            }
+            InstallVerdict::Installed => {
                 analysis.skipped.push(SoftwareSkip {
                     registry_key: key.path.clone(),
                     display_name: Some(display_name),
@@ -238,7 +268,18 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
                 });
                 continue;
             }
-            for (path, rule) in &install_matches {
+            InstallVerdict::Gone => {}
+        }
+
+        let now_ms = crate::safety::now_unix_ms();
+        let product = normalize_name(&display_name);
+        let mut candidates: Vec<(SoftwareKind, String, String)> = Vec::new();
+
+        // Install residue needs a recorded install path that no longer exists.
+        // A row without one has no path to invalidate, so a same-named directory
+        // is never install residue for it.
+        if state.install_location.is_some() {
+            for (path, rule) in &state.install_matches {
                 candidates.push((SoftwareKind::InstallDirectory, path.clone(), rule.clone()));
             }
         }
@@ -270,7 +311,7 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
 
             let (evidence, safety) = match kind {
                 SoftwareKind::InstallDirectory => {
-                    let recorded = match &install_location {
+                    let recorded = match &state.install_location {
                         Some(location) => format!("recorded install path {location} is missing"),
                         None => "the uninstall entry records no install path".to_string(),
                     };
@@ -298,7 +339,7 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
                 path,
                 display_name: display_name.clone(),
                 registry_key: key.path.clone(),
-                install_location: install_location.clone(),
+                install_location: state.install_location.clone(),
                 rule,
                 evidence,
                 safety,
@@ -311,7 +352,7 @@ pub fn analyze(snapshot: &RegistrySnapshot, ctx: &SoftwareContext<'_>) -> Softwa
     analysis
 }
 
-fn value(values: &std::collections::BTreeMap<String, RegistryValue>, name: &str) -> Option<String> {
+pub(crate) fn value(values: &std::collections::BTreeMap<String, RegistryValue>, name: &str) -> Option<String> {
     values
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(name))

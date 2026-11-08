@@ -15,33 +15,7 @@ use crate::{Result, platform};
 
 pub(super) fn scan(options: SoftwareOptions) -> Result<SoftwareReport> {
     let snapshot = crate::registry::windows::snapshot_registry();
-    let dir_exists = |path: &str| Path::new(path).is_dir();
-    let file_exists = |path: &str| Path::new(path).is_file();
-    let list_dir = |path: &str| {
-        let read = fs::read_dir(path);
-        read.map(|entries| {
-            entries
-                .flatten()
-                .filter(|entry| entry.file_type().map(|kind| kind.is_dir() && !kind.is_symlink()).unwrap_or(false))
-                .map(|entry| entry.file_name().to_string_lossy().to_string())
-                .collect()
-        })
-        .unwrap_or_default()
-    };
-    let dir_size = |path: &str| size_of(Path::new(path));
-    let env = |name: &str| std::env::var(name).ok();
-    let process_image_dirs =
-        || crate::safety::process_paths().image_dirs.iter().map(|dir| dir.to_string_lossy().to_string()).collect::<Vec<String>>();
-    let newest_entry_unix_ms = |path: &str| crate::safety::newest_entry_unix_ms(Path::new(path));
-    let ctx = SoftwareContext {
-        dir_exists: &dir_exists,
-        file_exists: &file_exists,
-        list_dir: &list_dir,
-        dir_size: &dir_size,
-        env: &env,
-        process_image_dirs: &process_image_dirs,
-        newest_entry_unix_ms: &newest_entry_unix_ms,
-    };
+    let ctx = live_context();
 
     let analysis = analyze::analyze(&snapshot, &ctx);
     let mut findings = analysis.findings;
@@ -62,6 +36,58 @@ pub(super) fn scan(options: SoftwareOptions) -> Result<SoftwareReport> {
         warnings,
         scanned_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_millis() as u64).unwrap_or(0),
     })
+}
+
+/// The live file-system and process inputs of the install evidence chain. The
+/// software and registry commands both build their context from this one table,
+/// so one uninstall key cannot be judged from different inputs depending on
+/// which command asked.
+pub(crate) fn live_context() -> SoftwareContext<'static> {
+    SoftwareContext {
+        dir_exists: &dir_exists,
+        file_exists: &file_exists,
+        list_dir: &list_dir,
+        dir_size: &dir_size,
+        env: &env,
+        process_image_dirs: &process_image_dirs,
+        newest_entry_unix_ms: &newest_entry_unix_ms,
+    }
+}
+
+fn dir_exists(path: &str) -> bool {
+    Path::new(path).is_dir()
+}
+
+fn file_exists(path: &str) -> bool {
+    Path::new(path).is_file()
+}
+
+fn list_dir(path: &str) -> Vec<String> {
+    let read = fs::read_dir(path);
+    read.map(|entries| {
+        entries
+            .flatten()
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir() && !kind.is_symlink()).unwrap_or(false))
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn dir_size(path: &str) -> u64 {
+    size_of(Path::new(path))
+}
+
+fn env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+fn process_image_dirs() -> Vec<String> {
+    crate::safety::process_paths().image_dirs.iter().map(|dir| dir.to_string_lossy().to_string()).collect()
+}
+
+fn newest_entry_unix_ms(path: &str) -> Option<u64> {
+    crate::safety::newest_entry_unix_ms(Path::new(path))
 }
 
 /// Directory size without following links or reparse points.

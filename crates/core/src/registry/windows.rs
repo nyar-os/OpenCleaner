@@ -4,6 +4,7 @@
 //! residue rules read. The raw Win32 calls live in [`super::win32`].
 
 use std::{
+    collections::BTreeMap,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -11,10 +12,13 @@ use std::{
 use super::{
     RegistryEntry, RegistryOptions, RegistryReport, RegistryResidueOptions, RegistryResidueReport,
     analyze::{self, AnalyzeContext},
-    model::RegistrySnapshot,
+    model::{RegistrySnapshot, RegistryValue},
     win32::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, OwnedKey, hive_label, map_value},
 };
-use crate::Result;
+use crate::{
+    Result,
+    software::analyze::{InstallVerdict, install_roots, installation, value},
+};
 
 const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
 
@@ -93,7 +97,8 @@ pub(super) fn residue_scan(options: RegistryResidueOptions) -> Result<RegistryRe
     let snapshot = snapshot_registry();
     let exists = |path: &Path| path.exists();
     let env = |name: &str| std::env::var(name).ok();
-    let ctx = AnalyzeContext { exists: &exists, env: &env };
+    let software = crate::software::windows::live_context();
+    let ctx = AnalyzeContext { exists: &exists, env: &env, software: &software };
     let mut findings = analyze::analyze(&snapshot, &ctx);
 
     let available = findings.len();
@@ -118,6 +123,8 @@ pub(super) fn scan(options: RegistryOptions) -> Result<RegistryReport> {
     let limit = options.limit.unwrap_or(100).max(1);
     let mut entries = Vec::new();
     let mut scanned_keys = 0usize;
+    let software = crate::software::windows::live_context();
+    let install_roots = install_roots(&software);
 
     for (hive, sam) in [(HKEY_LOCAL_MACHINE, KEY_READ | KEY_WOW64_64KEY), (HKEY_CURRENT_USER, KEY_READ)] {
         let Some(root) = OwnedKey::open(hive, UNINSTALL, sam)
@@ -132,30 +139,28 @@ pub(super) fn scan(options: RegistryOptions) -> Result<RegistryReport> {
             else {
                 continue;
             };
-            if let Some(flag) = key.value("SystemComponent").as_ref().and_then(super::win32::dword_value)
-                && flag == 1
-            {
+            let values: BTreeMap<String, RegistryValue> = key.values().iter().map(|(name, value)| (name.clone(), map_value(value))).collect();
+
+            // One key, one answer: the row is a candidate only when the shared
+            // install evidence chain says the product is gone, never merely
+            // because its recorded install path is missing.
+            let state = installation(&values, &install_roots, &software);
+            if state.verdict != InstallVerdict::Gone {
                 continue;
             }
-
-            let display_name = key.value("DisplayName").as_ref().and_then(super::win32::string_value);
-            let install_location = key.value("InstallLocation").as_ref().and_then(super::win32::string_value);
-            let version = key.value("DisplayVersion").as_ref().and_then(super::win32::string_value);
-
-            let Some(location) = install_location
+            let Some(location) = state.install_location.clone()
             else {
                 continue;
             };
-            let location = location.trim_matches('"').trim().to_string();
-            if location.is_empty() || Path::new(&location).exists() {
+            if Path::new(&location).exists() {
                 continue;
             }
 
             entries.push(RegistryEntry {
                 key: format!("{}\\{subkey}", hive_label(hive)),
-                display_name,
+                display_name: state.display_name,
                 install_location: Some(location),
-                version,
+                version: value(&values, "DisplayVersion"),
                 reason: "install-location-missing".to_string(),
             });
         }

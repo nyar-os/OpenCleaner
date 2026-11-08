@@ -31,7 +31,10 @@ Use when the user asks about orphaned uninstall entries or stale installed-progr
    <reason>  <display name or key>  <install location>
    ```
 
-   `install-location-missing` means the recorded `InstallLocation` no longer exists.
+   `install-location-missing` means the row is orphaned: its recorded `InstallLocation`
+   no longer exists and the same install evidence chain the `software` command uses finds
+   no executable, no running image, no installer registration and no recently written
+   matching directory. A missing install path alone is not enough to report a row.
    Absent `DisplayName`, `InstallLocation`, or version fields mean the registry value was
    missing or empty.
 
@@ -39,7 +42,9 @@ Use when the user asks about orphaned uninstall entries or stale installed-progr
 
 - `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` (64-bit view)
 - `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`
-- Entries marked `SystemComponent` are skipped.
+- Entries marked `SystemComponent`, update packages (`ParentKeyName` or an update
+  `ReleaseType`), and rows whose install evidence still proves the product is present are
+  skipped.
 
 ## Safety
 

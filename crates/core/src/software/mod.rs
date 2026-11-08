@@ -6,7 +6,7 @@
 
 pub mod analyze;
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 
 use serde::{Deserialize, Serialize};
 
