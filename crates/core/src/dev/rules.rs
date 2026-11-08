@@ -156,15 +156,20 @@ pub const PROJECT_RULES: &[ProjectRule] = &[
 const SKIP_DESCEND: &[&str] =
     &[".git", "node_modules", "target", "dist", "build", ".next", ".turbo", ".venv", "venv", "vendor", ".gradle", "obj", "bin"];
 
-/// Directory names whose entire subtree is off limits: repository metadata,
-/// workflow configuration and the Rust toolchain root. These are identities,
-/// not caches, so a component match is the right granularity.
-const PROTECTED_TREES: &[&str] = &[".git", ".github", ".rustup"];
+/// Directory names whose entire subtree is repository identity: the history,
+/// the index and the workflow configuration live there, and no file inside is
+/// rebuildable. These are the only trees protected as a whole.
+const PROTECTED_TREES: &[&str] = &[".git", ".github"];
 
 /// Paths inside a Cargo home that hold credentials, configuration or the
 /// toolchain shims. `registry` and `git` are deliberately absent: they are
 /// rebuildable level-2 caches, so protecting all of `.cargo` would hide them.
 const PROTECTED_CARGO_PATHS: &[&str] = &["bin", "config", "config.toml", "credentials.toml"];
+
+/// Paths inside a Rustup home that hold the installed toolchains and the
+/// settings selecting them. The download and temporary caches are deliberately
+/// absent: they are fetched again when needed.
+const PROTECTED_RUSTUP_PATHS: &[&str] = &["profiles", "settings.toml", "toolchains", "update-hashes"];
 
 /// Manifest and lockfile names that can never become a candidate, at any depth.
 const PROTECTED_FILES: &[&str] = &[
@@ -199,9 +204,9 @@ pub fn should_skip_descend(name: &OsStr) -> bool {
 }
 
 /// Reject paths that must never be deleted: repositories, manifests,
-/// lockfiles, toolchain roots, and Cargo's credentials/config/shim paths.
-/// Protection is path-granular: a cache inside `.cargo` is not protected just
-/// because it lives under that directory.
+/// lockfiles, toolchain installs, and the credentials, configuration and shim
+/// paths of Cargo and Rustup. Protection is path-granular: a cache inside a
+/// tool home is not protected just because it lives under that directory.
 pub fn is_protected(path: &Path) -> bool {
     let components: Vec<String> = path
         .components()
@@ -213,7 +218,11 @@ pub fn is_protected(path: &Path) -> bool {
     if components.iter().any(|name| PROTECTED_TREES.contains(&name.as_str()) || PROTECTED_FILES.contains(&name.as_str())) {
         return true;
     }
-    components.windows(2).any(|pair| pair[0] == ".cargo" && PROTECTED_CARGO_PATHS.contains(&pair[1].as_str()))
+    components.windows(2).any(|pair| match pair[0].as_str() {
+        ".cargo" => PROTECTED_CARGO_PATHS.contains(&pair[1].as_str()),
+        ".rustup" => PROTECTED_RUSTUP_PATHS.contains(&pair[1].as_str()),
+        _ => false,
+    })
 }
 
 /// Components that mark a path as installed software rather than a user
@@ -460,6 +469,15 @@ mod tests {
         assert!(!is_protected(&cargo.join("registry")));
         assert!(!is_protected(&cargo.join("git")));
         assert!(!is_protected(&cargo.join("registry").join("cache")));
+
+        // Rustup follows the same path rule: an installed toolchain and the
+        // settings that select it stay protected, the download cache does not.
+        let rustup = root.join("home").join(".rustup");
+        for name in ["toolchains", "toolchains\\stable-x86_64-pc-windows-msvc", "settings.toml", "update-hashes", "profiles"] {
+            assert!(is_protected(&rustup.join(name)), ".rustup\\{name} should be protected");
+        }
+        assert!(!is_protected(&rustup.join("downloads")));
+        assert!(!is_protected(&rustup.join("tmp")));
 
         let _ = fs::remove_dir_all(&root);
     }
