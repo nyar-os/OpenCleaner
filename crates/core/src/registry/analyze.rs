@@ -72,6 +72,21 @@ fn is_startup_key(upper: &str) -> bool {
     upper.ends_with(r"\CURRENTVERSION\RUN") || upper.ends_with(r"\CURRENTVERSION\RUNONCE")
 }
 
+/// Only an absolute path can be checked by existence. A bare command name such
+/// as `MsiExec.exe`, a value without an extension or an unexpanded `%1` is
+/// resolved by the shell through `PATH` and its own lookup rules, so a failed
+/// path check says nothing about whether the target is gone.
+fn absolute_target(text: &str) -> Option<String> {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    let absolute = match bytes {
+        [letter, b':', separator, ..] => letter.is_ascii_alphabetic() && (*separator == b'\\' || *separator == b'/'),
+        [b'\\', b'\\', ..] => true,
+        _ => false,
+    };
+    absolute.then(|| text.to_string())
+}
+
 fn uninstall_residue(snapshot: &RegistrySnapshot, key: &super::model::RegistryKey, ctx: &AnalyzeContext<'_>) -> Option<RegistryFinding> {
     if snapshot.value(&key.path, "SystemComponent").and_then(dword).map(|value| value == 1).unwrap_or(false) {
         return None;
@@ -81,7 +96,8 @@ fn uninstall_residue(snapshot: &RegistrySnapshot, key: &super::model::RegistryKe
     }
     let display_name = resolved_text(snapshot, &key.path, "DisplayName", ctx)?;
     let location = resolved_text(snapshot, &key.path, "InstallLocation", ctx)?;
-    if location.is_empty() || (ctx.exists)(Path::new(&location)) {
+    let location = absolute_target(&location)?;
+    if (ctx.exists)(Path::new(&location)) {
         return None;
     }
     Some(RegistryFinding {
@@ -201,7 +217,8 @@ pub fn expand_env(value: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<S
 
 /// Extract the executable path from a command line. Quoted paths are taken
 /// verbatim; otherwise the prefix up to `.exe` is used so unquoted paths with
-/// spaces still resolve.
+/// spaces still resolve. A command that does not name an absolute file is
+/// reported as unrecognized, never as a missing target.
 pub fn resolve_executable(command: &str, ctx: &AnalyzeContext<'_>) -> Option<String> {
     let text = command.trim();
     let candidate = if let Some(rest) = text.strip_prefix('"') {
@@ -219,7 +236,7 @@ pub fn resolve_executable(command: &str, ctx: &AnalyzeContext<'_>) -> Option<Str
         return None;
     }
     let candidate = if candidate.contains('%') { expand_env(candidate, ctx.env)? } else { candidate.to_string() };
-    Some(candidate)
+    absolute_target(&candidate)
 }
 
 #[cfg(test)]
@@ -270,6 +287,23 @@ mod tests {
 [HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce]
 "Expanding"="%ProgramFiles%\\Gone App\\setup.exe /silent"
 "UnknownVar"="%NOT_DEFINED%\\tool.exe"
+"#;
+
+    /// Registry rows whose command is not an absolute path: a bare uninstaller
+    /// name, a shell placeholder, a command without an extension and a relative
+    /// install location. None of them can be checked by path lookup.
+    const BARE_COMMANDS: &str = r#"Windows Registry Editor Version 5.00
+
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Portable App]
+"DisplayName"="Portable App"
+"InstallLocation"="..\\Portable App"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\barefile\shell\open\command]
+@="MsiExec.exe /X{BARE-ID}"
+
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run]
+"NoExtension"="perfmon /res"
+"ShellPlaceholder"="%1"
 "#;
 
     fn existing(paths: &[&str]) -> BTreeSet<PathBuf> {
@@ -352,6 +386,18 @@ mod tests {
         assert!(!findings.iter().any(|f| f.value_name.as_deref() == Some("UnknownVar")));
         // The healthy startup value is excluded.
         assert!(!findings.iter().any(|f| f.value_name.as_deref() == Some("AliveAgent")));
+    }
+
+    #[test]
+    fn bare_commands_and_missing_extensions_are_not_missing_targets() {
+        let snapshot = parse_reg(BARE_COMMANDS, "bare.reg");
+        let empty = BTreeSet::new();
+        let env = |_: &str| None;
+        let exists = |path: &Path| empty.iter().any(|candidate: &PathBuf| candidate.as_path() == path);
+        let ctx = AnalyzeContext { exists: &exists, env: &env };
+        let findings = analyze(&snapshot, &ctx);
+
+        assert!(findings.is_empty(), "{findings:#?}");
     }
 
     #[test]
