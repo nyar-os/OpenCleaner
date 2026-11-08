@@ -511,6 +511,7 @@ cli.command('build-dirs', 'cli.cmd.buildDirs')
     .option('--cwd <path>', 'cli.opt.cwd')
     .option('--root <path>...', 'cli.opt.probeRoot')
     .option('--min-bytes <n>', 'cli.opt.minBytes', integerOption('min-bytes', 1))
+    .option('--depth <n>', 'cli.opt.depth', integerOption('depth', 1))
     .actionCtx(async (options) => {
         applyActor(options);
         try {
@@ -518,6 +519,7 @@ cli.command('build-dirs', 'cli.cmd.buildDirs')
                 cwd: text(options, 'cwd'),
                 roots: list(options, 'root'),
                 minBytes: numberOption(options, 'min-bytes'),
+                depth: numberOption(options, 'depth'),
             });
             console.log(`cwd: ${report.cwd}`);
             const accepted = report.declarations.filter((item) => item.accepted).length;
@@ -534,24 +536,46 @@ cli.command('build-dirs', 'cli.cmd.buildDirs')
                 if (item.reason) console.log(`  invalid: ${item.reason}`);
             }
             if (report.effectivePath) console.log(`\neffective target dir: ${report.effectivePath}  (${report.effectiveSource})`);
-            if (report.probes.length) {
-                console.log('\nbuild output markers under probe roots:');
-                for (const probe of report.probes) {
-                    const state = probe.covered ? `covered by ${probe.coveredBy}` : 'no declaration';
-                    console.log(`  ${formatBytes(probe.bytes).padStart(10)}  ${probe.path}  [${probe.markers.join(', ')}]  ${state}`);
+            if (report.matches.length) {
+                console.log('\nmarker-proven build output:');
+                for (const item of report.matches) {
+                    console.log(`  ${formatBytes(item.bytes).padStart(10)}  ${item.path}  [${item.attribution}]`);
+                    for (const path of item.evidence) console.log(`              evidence: ${path}`);
+                    if (item.coveredByDeclaration) console.log(`              declared by: ${item.coveredByDeclaration}`);
+                    if (item.alsoInBuildRoots) console.log('              also counted by build-roots (not added twice)');
+                }
+            } else if (report.roots.length) {
+                console.log('\nno directory under the probe roots carries CACHEDIR.TAG plus a Cargo-specific marker.');
+            }
+            if (report.rejected.length) {
+                console.log('\nmarker-proven but refused by the location rules:');
+                for (const item of report.rejected) {
+                    console.log(`  ${item.path}  (${item.reason})`);
+                    for (const path of item.evidence) console.log(`              evidence: ${path}`);
                 }
             }
             if (report.uncovered.length) {
                 console.log('\nuncovered directories:');
                 for (const item of report.uncovered) {
-                    const markers = item.markers.length ? item.markers.join(', ') : 'none';
-                    console.log(`  ${formatBytes(item.bytes).padStart(10)}  ${item.path}  markers: ${markers}`);
-                    console.log(`              ${item.note}`);
+                    console.log(`  ${formatBytes(item.bytes).padStart(10)}  ${item.path}${item.alsoInBuildRoots ? '  (already declared in build-roots)' : ''}`);
+                    console.log(`              ${item.reason}`);
+                    for (const path of item.evidence) console.log(`              marker: ${path}`);
                 }
-                console.log('\nno declaration covers these. Nothing is selected and nothing is deleted here.');
+                console.log('\nnothing here is selected and nothing is deleted.');
             } else if (report.roots.length) {
                 console.log('\nno uncovered directory at or above the size floor.');
             }
+            if (report.buildRoots.length) {
+                console.log(`\nbuild-roots overlap (compared with ${report.buildRootConfig ?? 'the build-root config'}):`);
+                for (const item of report.buildRoots) {
+                    const size = item.bytes === null || item.bytes === undefined ? 'unmeasured' : formatBytes(item.bytes);
+                    console.log(`  line ${item.line}  ${size.padStart(10)}  ${item.path}  ${item.matchedByMarkers ? 'matched' : 'no marker match'}`);
+                    console.log(`              ${item.note}`);
+                }
+            }
+            console.log(
+                `\nmatched: ${formatBytes(report.matchedBytes)}  in build-roots: ${formatBytes(report.matchedBytesInBuildRoots)}  unique: ${formatBytes(report.uniqueMatchedBytes)}`,
+            );
             for (const warning of report.warnings) console.log(`warning: ${warning}`);
             return 0;
         } catch (err) {

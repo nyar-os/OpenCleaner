@@ -493,10 +493,12 @@ export type BuildRootCleanReport = {
 export type BuildDirOptions = {
     /** Directory whose Cargo configuration is resolved. Defaults to the process cwd. */
     cwd?: string;
-    /** Directories probed one level down for output that no declaration covers. */
+    /** Directories probed for marker-proven build output. Never a name guess. */
     roots?: string[];
     /** Size floor for the uncovered list, in bytes. */
     minBytes?: number;
+    /** Levels inspected below each root. 1 inspects only the root's children. */
+    depth?: number;
 };
 
 export type BuildDirDeclaration = {
@@ -519,20 +521,49 @@ export type BuildDirDeclaration = {
     effective: boolean;
 };
 
-export type BuildOutputProbe = {
+/** `cargo-markers`: proven by `CACHEDIR.TAG` plus a Cargo-specific marker file. */
+export type MatchAttribution = 'cargo-markers';
+
+export type BuildOutputMatch = {
     path: string;
     bytes: number;
-    markers: string[];
-    covered: boolean;
-    coveredBy?: string | null;
+    /** Absolute paths of the marker files that satisfied the rule. */
+    evidence: string[];
+    attribution: MatchAttribution;
+    /** The satisfied rule in one sentence. */
+    reason: string;
+    /** A declaration also names this directory or one of its ancestors. */
+    coveredByDeclaration?: string | null;
+    /** The separate build-root config already counts these bytes. */
+    alsoInBuildRoots: boolean;
+};
+
+/** A marker-proven directory refused by the location rules. */
+export type RejectedDirectory = {
+    path: string;
+    evidence: string[];
+    reason: string;
+};
+
+/** One entry of the separate build-root config, compared rather than merged. */
+export type BuildRootOverlap = {
+    path: string;
+    line: number;
+    exists: boolean;
+    /** Only set when the path was measured inside a probe root. */
+    bytes?: number | null;
+    matchedByMarkers: boolean;
+    note: string;
 };
 
 export type UncoveredDirectory = {
     path: string;
     bytes: number;
-    /** Empty when nothing structurally identifies the directory as build output. */
-    markers: string[];
-    note: string;
+    /** Marker paths that were found but did not satisfy the rule. */
+    evidence: string[];
+    reason: string;
+    /** The separate build-root config already declares this directory. */
+    alsoInBuildRoots: boolean;
 };
 
 export type BuildDirReport = {
@@ -541,8 +572,16 @@ export type BuildDirReport = {
     effectivePath?: string | null;
     effectiveSource?: string | null;
     roots: string[];
-    probes: BuildOutputProbe[];
+    /** Build-root config read for the overlap comparison, when one was found. */
+    buildRootConfig?: string | null;
+    matches: BuildOutputMatch[];
+    rejected: RejectedDirectory[];
     uncovered: UncoveredDirectory[];
+    buildRoots: BuildRootOverlap[];
+    matchedBytes: number;
+    /** Part of `matchedBytes` the build-root config already counts. */
+    matchedBytesInBuildRoots: number;
+    uniqueMatchedBytes: number;
     warnings: string[];
     scannedAtUnixMs: number;
 };

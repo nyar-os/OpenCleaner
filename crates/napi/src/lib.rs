@@ -753,8 +753,13 @@ fn snake_case_key(key: &str) -> String {
 fn audited_build_dir_scan(options: BuildDirOptions, params: Value) -> Result<open_cleaner_core::BuildDirReport> {
     audit::run("build-dir-scan", Mode::DryRun, params, || {
         let report = build_dir_scan(options)?;
-        let count = report.declarations.len() as u64;
-        let summary = format!("{count} declarations, {} markers, {} uncovered directories", report.probes.len(), report.uncovered.len());
+        let count = report.matches.len() as u64;
+        let summary = format!(
+            "{count} marker matches, {} rejected, {} uncovered directories, {} declarations",
+            report.rejected.len(),
+            report.uncovered.len(),
+            report.declarations.len()
+        );
         Ok((report, audit::Summary::new(count, summary)))
     })
     .map_err(core_error)

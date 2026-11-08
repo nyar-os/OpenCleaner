@@ -1,7 +1,7 @@
-//! Explicit Cargo build-output declarations.
+//! Cargo build-output discovery: explicit declarations plus marker proof.
 //!
 //! A shared build directory has no project manifest, so the manifest-anchored
-//! developer rule can never claim it. This domain accepts exactly two explicit
+//! developer rule can never claim it. Part one accepts exactly two explicit
 //! declarations: the `CARGO_TARGET_DIR` environment variable, and the
 //! `build.target-dir` key of a Cargo config file, resolved the way Cargo
 //! resolves it (the working directory and its ancestors, nearest file wins).
@@ -11,14 +11,24 @@
 //! A declaration that cannot be used is reported with a reason. It is never
 //! dropped silently, and it is never replaced by a directory-name guess.
 //!
+//! Part two walks explicit probe roots and accepts a directory as Cargo build
+//! output only when `CACHEDIR.TAG` sits next to a Cargo-specific marker:
+//! `.rustc_info.json`, or `*/debug/.fingerprint` / `*/release/.fingerprint`
+//! below it. The tag alone is never enough, because other tools write it too.
+//! Directory names carry no weight here: a directory called `target` is not a
+//! candidate by name, and output found anywhere else is. The report lists the
+//! marker files that actually matched, so the reason is auditable.
+//!
 //! The operator-declared build-root config is a separate source and is not
-//! read here: two declaration strengths must not be merged into one.
+//! read here: two declaration strengths must not be merged into one. It is
+//! only compared for overlap, and a match it already covers is excluded from
+//! this domain's unique byte total.
 //!
 //! This domain is read-only. It has no plan step and no delete step, and its
 //! output cannot be handed to any cleanup call.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -70,17 +80,28 @@ pub struct BuildDirOptions {
     /// Directory whose Cargo configuration is resolved. Defaults to the
     /// current working directory.
     pub cwd: Option<String>,
-    /// Directories searched one level down for build output that no
-    /// declaration covers.
+    /// Directories probed for marker-proven build output.
     pub roots: Vec<String>,
     /// Size floor for the uncovered-directory list.
     #[serde(default = "default_min_bytes")]
     pub min_bytes: u64,
+    /// Levels below each root that are inspected. `1` checks only the root's
+    /// immediate children. A matched directory is never descended into, so an
+    /// inner build output is not reported twice.
+    #[serde(default = "default_depth")]
+    pub depth: usize,
 }
 
 impl BuildDirOptions {
     fn resolved_min_bytes(&self) -> u64 {
         if self.min_bytes == 0 { default_min_bytes() } else { self.min_bytes }
+    }
+
+    fn resolved_depth(&self) -> usize {
+        match self.depth {
+            0 => default_depth(),
+            value => value.min(3),
+        }
     }
 }
 
@@ -115,29 +136,66 @@ pub struct BuildDirDeclaration {
     pub effective: bool,
 }
 
-/// A directory that carries Cargo build-output markers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildOutputProbe {
-    pub path: String,
-    pub bytes: u64,
-    /// Marker names found, for example `.rustc_info.json`.
-    pub markers: Vec<String>,
-    /// A valid declaration names this directory or one of its ancestors.
-    pub covered: bool,
-    /// Declaration that covers it, as `source -> resolved`.
-    pub covered_by: Option<String>,
+/// How a directory earned its place in the report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MatchAttribution {
+    /// `CACHEDIR.TAG` together with at least one Cargo-specific marker. Never a
+    /// directory name, a declaration and never a manifest anchor.
+    CargoMarkers,
 }
 
-/// A directory large enough to matter that no declaration names.
+/// A directory proven to be Cargo build output by marker files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildOutputMatch {
+    pub path: String,
+    pub bytes: u64,
+    /// Absolute paths of the marker files that satisfied the rule.
+    pub evidence: Vec<String>,
+    pub attribution: MatchAttribution,
+    /// The satisfied rule in one sentence.
+    pub reason: String,
+    /// A declaration also names this directory or one of its ancestors.
+    pub covered_by_declaration: Option<String>,
+    /// The separate build-root config also covers this path, so the same bytes
+    /// are already accounted for there.
+    pub also_in_build_roots: bool,
+}
+
+/// Marker-proven build output that the location rules refuse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RejectedDirectory {
+    pub path: String,
+    pub evidence: Vec<String>,
+    pub reason: String,
+}
+
+/// One entry of the separate build-root config, compared with this domain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildRootOverlap {
+    pub path: String,
+    pub line: u64,
+    pub exists: bool,
+    /// Bytes, only when the path was measured inside a probe root.
+    pub bytes: Option<u64>,
+    /// A marker match lies at or inside this declared path.
+    pub matched_by_markers: bool,
+    pub note: String,
+}
+
+/// A directory large enough to matter that no marker match and no declaration
+/// covers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UncoveredDirectory {
     pub path: String,
     pub bytes: u64,
-    /// Cargo build-output markers found at this directory or its immediate
-    /// children. Empty means nothing structurally identifies it as build
-    /// output, and it is listed because of its size only.
-    pub markers: Vec<String>,
-    pub note: String,
+    /// Absolute marker paths that were found but did not satisfy the rule.
+    /// Empty means nothing structural exists, and it listed because of size.
+    pub evidence: Vec<String>,
+    pub reason: String,
+    /// The separate build-root config already declares this directory, so the
+    /// gap exists only in this domain and the bytes are not unaccounted for.
+    pub also_in_build_roots: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -151,30 +209,52 @@ pub struct BuildDirReport {
     /// Source of that declaration.
     pub effective_source: Option<String>,
     pub roots: Vec<String>,
-    /// Marker-carrying directories found under `roots`.
-    pub probes: Vec<BuildOutputProbe>,
-    /// Large directories under `roots` that no declaration covers.
+    /// Config file the overlap comparison read, when one was found.
+    pub build_root_config: Option<String>,
+    /// Directories proven to be Cargo build output by markers.
+    pub matches: Vec<BuildOutputMatch>,
+    /// Marker-proven directories refused by the location rules.
+    pub rejected: Vec<RejectedDirectory>,
+    /// Large directories that no marker match and no declaration covers.
     pub uncovered: Vec<UncoveredDirectory>,
+    /// Entries of the separate build-root config, compared for overlap only.
+    pub build_roots: Vec<BuildRootOverlap>,
+    /// Bytes of all unique matches.
+    pub matched_bytes: u64,
+    /// Part of `matched_bytes` that the build-root config already counts.
+    pub matched_bytes_in_build_roots: u64,
+    /// `matched_bytes - matched_bytes_in_build_roots`.
+    pub unique_matched_bytes: u64,
     pub warnings: Vec<String>,
     pub scanned_at_unix_ms: u64,
 }
 
-/// Read the explicit declarations and, for explicit roots, the build output
-/// that none of them covers. Nothing is measured outside the given roots and
-/// nothing is modified anywhere.
+/// Read the explicit declarations and, for explicit roots, the marker-proven
+/// build output. Nothing is measured outside the given roots and nothing is
+/// modified anywhere.
 pub fn build_dir_scan(options: BuildDirOptions) -> Result<BuildDirReport> {
     let env = |key: &str| std::env::var(key).ok();
-    build_dir_report(options, &env, &base_dirs())
+    let build_roots = crate::anchors::default_build_root_config();
+    build_dir_report(options, &env, &base_dirs(), build_roots.as_deref())
 }
 
-/// Testable form with an injected environment and base directories.
-fn build_dir_report(options: BuildDirOptions, env: &dyn Fn(&str) -> Option<String>, dirs: &BaseDirs) -> Result<BuildDirReport> {
+/// Testable form with an injected environment, base directories and an
+/// explicit build-root config path.
+fn build_dir_report(
+    options: BuildDirOptions,
+    env: &dyn Fn(&str) -> Option<String>,
+    dirs: &BaseDirs,
+    build_root_config: Option<&Path>,
+) -> Result<BuildDirReport> {
     let cwd = match options.cwd.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => normalize(&std::path::absolute(PathBuf::from(value)).unwrap_or_else(|_| PathBuf::from(value))),
         None => std::env::current_dir().map_err(|error| Error::Message(format!("build-dirs: no working directory: {error}")))?,
     };
 
-    let mut warnings = vec!["the operator-declared build-root config is a separate source and is not evaluated here".to_string()];
+    let mut warnings = vec![
+        "the operator-declared build-root config is a separate source: it is only compared for overlap and is never merged into this domain's totals"
+            .to_string(),
+    ];
     let mut declarations = collect_declarations(&cwd, env, dirs, &mut warnings);
     apply_precedence(&mut declarations);
 
@@ -193,14 +273,32 @@ fn build_dir_report(options: BuildDirOptions, env: &dyn Fn(&str) -> Option<Strin
             normalize(&std::path::absolute(&path).unwrap_or(path))
         })
         .collect();
-    let mut probes = Vec::new();
-    let mut uncovered = Vec::new();
-    for root in &roots {
-        scan_root(root, &declarations, options.resolved_min_bytes(), &mut probes, &mut uncovered, &mut warnings);
-    }
 
-    probes.sort_by(|left, right| right.bytes.cmp(&left.bytes).then_with(|| left.path.cmp(&right.path)));
+    let mut output = ProbeOutput::default();
+    for root in &roots {
+        scan_root(root, options.resolved_depth(), &declarations, options.resolved_min_bytes(), &mut output, &mut warnings);
+    }
+    let mut matches = output.matches;
+    let mut rejected = output.rejected;
+    let mut uncovered = output.uncovered;
+    let measured = output.measured;
+
+    dedupe_by_path(&mut matches, |item| &item.path);
+    dedupe_by_path(&mut rejected, |item| &item.path);
+    dedupe_by_path(&mut uncovered, |item| &item.path);
+    matches.sort_by(|left, right| right.bytes.cmp(&left.bytes).then_with(|| left.path.cmp(&right.path)));
+    rejected.sort_by(|left, right| left.path.cmp(&right.path));
     uncovered.sort_by(|left, right| right.bytes.cmp(&left.bytes).then_with(|| left.path.cmp(&right.path)));
+
+    let (declared_roots, config_path) = build_root_declarations(build_root_config, &mut warnings);
+    let build_roots = compare_build_roots(declared_roots, &mut matches, &measured);
+    let matched_bytes: u64 = matches.iter().map(|item| item.bytes).sum();
+    let matched_bytes_in_build_roots: u64 = matches.iter().filter(|item| item.also_in_build_roots).map(|item| item.bytes).sum();
+    let covered_by_build_roots: Vec<String> = build_roots.iter().filter(|item| item.exists).map(|item| item.path.clone()).collect();
+    for item in &mut uncovered {
+        let path = Path::new(&item.path);
+        item.also_in_build_roots = covered_by_build_roots.iter().any(|declared| safety::is_within(Path::new(declared), path));
+    }
 
     Ok(BuildDirReport {
         cwd: cwd.display().to_string(),
@@ -208,11 +306,22 @@ fn build_dir_report(options: BuildDirOptions, env: &dyn Fn(&str) -> Option<Strin
         effective_source: effective.map(|item| item.source.clone()),
         declarations,
         roots: roots.iter().map(|path| path.display().to_string()).collect(),
-        probes,
+        build_root_config: config_path,
+        matches,
+        rejected,
         uncovered,
+        build_roots,
+        matched_bytes,
+        matched_bytes_in_build_roots,
+        unique_matched_bytes: matched_bytes.saturating_sub(matched_bytes_in_build_roots),
         warnings,
         scanned_at_unix_ms: safety::now_unix_ms(),
     })
+}
+
+fn dedupe_by_path<T>(items: &mut Vec<T>, path: impl Fn(&T) -> &String) {
+    let mut seen = BTreeSet::new();
+    items.retain(|item| seen.insert(safety::path_key(Path::new(path(item)))));
 }
 
 /// One config file that can declare a target directory.
@@ -427,20 +536,20 @@ fn apply_precedence(declarations: &mut [BuildDirDeclaration]) {
     }
 }
 
-fn marker_names(dir: &Path) -> Vec<String> {
-    let mut found = Vec::new();
-    if dir.join(".rustc_info.json").is_file() {
-        found.push(".rustc_info.json".to_string());
+const TAG_NAME: &str = "CACHEDIR.TAG";
+const PROFILE_FINGERPRINTS: [&str; 2] = ["debug", "release"];
+const FINGERPRINT_DIR: &str = ".fingerprint";
+
+fn default_depth() -> usize {
+    2
+}
+
+fn child_dir(entry: &fs::DirEntry) -> Option<PathBuf> {
+    let meta = entry.metadata().ok()?;
+    if !meta.is_dir() || platform::is_link_like(&meta) || meta.file_type().is_symlink() {
+        return None;
     }
-    if dir.join("CACHEDIR.TAG").is_file() {
-        found.push("CACHEDIR.TAG".to_string());
-    }
-    for profile in ["debug", "release"] {
-        if dir.join(profile).join(".fingerprint").is_dir() {
-            found.push(format!("{profile}/.fingerprint"));
-        }
-    }
-    found
+    Some(entry.path())
 }
 
 fn immediate_dirs(dir: &Path) -> Vec<PathBuf> {
@@ -448,51 +557,147 @@ fn immediate_dirs(dir: &Path) -> Vec<PathBuf> {
     else {
         return Vec::new();
     };
-    let mut dirs = Vec::new();
-    for entry in read.flatten() {
-        let Ok(meta) = entry.metadata()
-        else {
-            continue;
-        };
-        if !meta.is_dir() || platform::is_link_like(&meta) || meta.file_type().is_symlink() {
-            continue;
-        }
-        dirs.push(entry.path());
-    }
-    dirs
+    read.flatten().filter_map(|entry| child_dir(&entry)).collect()
 }
 
-/// Marker evidence for a directory and its immediate children. Depth is fixed:
-/// a build output root can sit one level below the probed directory.
-fn probe_markers(dir: &Path) -> Vec<(PathBuf, Vec<String>)> {
-    let mut hits = Vec::new();
-    let own = marker_names(dir);
-    if !own.is_empty() {
-        hits.push((dir.to_path_buf(), own));
-    }
-    for child in immediate_dirs(dir) {
-        let names = marker_names(&child);
-        if !names.is_empty() {
-            hits.push((child, names));
+fn is_plain_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && !platform::is_link_like(&meta) && !meta.file_type().is_symlink())
+}
+
+/// The rule names the profile directory itself: `debug/.fingerprint` or
+/// `release/.fingerprint` directly below the target root.
+fn profile_fingerprint(dir: &Path) -> Option<PathBuf> {
+    PROFILE_FINGERPRINTS.iter().map(|profile| dir.join(profile).join(FINGERPRINT_DIR)).find(|path| is_plain_dir(path))
+}
+
+/// Every Cargo release writes one `*.rustc_info.json` at the target root. The
+/// pattern is matched on the file name, so a renamed or prefixed copy still
+/// counts while a directory of that name never does.
+fn rustc_info_file(dir: &Path) -> Option<PathBuf> {
+    let read = fs::read_dir(dir).ok()?;
+    for entry in read.flatten() {
+        if !entry.file_name().to_string_lossy().ends_with("rustc_info.json") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata()
+            && meta.is_file()
+        {
+            return Some(entry.path());
         }
     }
-    hits
+    None
+}
+
+/// The markers present at a directory, whether or not they satisfy the rule.
+#[derive(Debug, Default)]
+struct MarkerState {
+    tag: Option<PathBuf>,
+    info: Option<PathBuf>,
+    fingerprint: Option<PathBuf>,
+}
+
+impl MarkerState {
+    fn scan(dir: &Path) -> Self {
+        let mut state = Self::default();
+        let tag = dir.join(TAG_NAME);
+        if tag.is_file() {
+            state.tag = Some(tag);
+        }
+        state.info = rustc_info_file(dir);
+        state.fingerprint = profile_fingerprint(dir);
+        state
+    }
+
+    fn has_cargo_marker(&self) -> bool {
+        self.info.is_some() || self.fingerprint.is_some()
+    }
+
+    fn evidence(&self) -> Vec<String> {
+        [self.tag.as_ref(), self.info.as_ref(), self.fingerprint.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|path| path.display().to_string())
+            .collect()
+    }
+}
+
+/// `CACHEDIR.TAG` alone is used by other tools, so a directory counts as Cargo
+/// build output only when the tag and a Cargo-specific marker both hold.
+fn cargo_build_evidence(dir: &Path) -> Option<Vec<PathBuf>> {
+    let tag = dir.join(TAG_NAME);
+    if !tag.is_file() {
+        return None;
+    }
+    if let Some(info) = rustc_info_file(dir) {
+        return Some(vec![tag, info]);
+    }
+    let fingerprint = profile_fingerprint(dir)?;
+    Some(vec![tag, fingerprint])
+}
+
+fn refusal(path: &Path) -> Option<String> {
+    if is_volume_root(path) {
+        return Some("a filesystem root is never a build-output candidate".to_string());
+    }
+    if safety::has_protected_component(path) {
+        return Some("inside a system or installed directory".to_string());
+    }
+    safety::ensure_not_install_root(path, "build-dirs").err().map(|error| error.to_string())
 }
 
 fn declaring_source(declaration: &BuildDirDeclaration) -> String {
     format!("{} -> {}", declaration.source, declaration.resolved)
 }
 
+#[derive(Default)]
+struct ProbeOutput {
+    matches: Vec<BuildOutputMatch>,
+    rejected: Vec<RejectedDirectory>,
+    uncovered: Vec<UncoveredDirectory>,
+    measured: BTreeMap<String, u64>,
+}
+
+fn push_match(path: &Path, bytes: u64, evidence: Vec<PathBuf>, declarations: &[BuildDirDeclaration], output: &mut ProbeOutput) {
+    let evidence: Vec<String> = evidence.iter().map(|item| item.display().to_string()).collect();
+    if let Some(reason) = refusal(path) {
+        output.rejected.push(RejectedDirectory { path: path.display().to_string(), evidence, reason });
+        return;
+    }
+    output.matches.push(BuildOutputMatch {
+        path: path.display().to_string(),
+        bytes,
+        evidence,
+        attribution: MatchAttribution::CargoMarkers,
+        reason: format!("{TAG_NAME} is present together with a Cargo-specific marker"),
+        covered_by_declaration: declarations
+            .iter()
+            .find(|item| item.accepted && safety::is_within(Path::new(&item.resolved), path))
+            .map(declaring_source),
+        also_in_build_roots: false,
+    });
+}
+
 fn scan_root(
     root: &Path,
+    depth: usize,
     declarations: &[BuildDirDeclaration],
     min_bytes: u64,
-    probes: &mut Vec<BuildOutputProbe>,
-    uncovered: &mut Vec<UncoveredDirectory>,
+    output: &mut ProbeOutput,
     warnings: &mut Vec<String>,
 ) {
-    if !root.is_dir() {
-        warnings.push(format!("probe root does not exist: {}", root.display()));
+    let meta = match fs::symlink_metadata(root) {
+        Ok(meta) => meta,
+        Err(error) => {
+            warnings.push(format!("cannot inspect probe root {}: {error}", root.display()));
+            return;
+        }
+    };
+    if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
+        warnings.push(format!("probe root is a symbolic link or junction and is never followed: {}", root.display()));
+        return;
+    }
+    if !meta.is_dir() {
+        warnings.push(format!("probe root does not exist or is not a directory: {}", root.display()));
         return;
     }
     let read = match fs::read_dir(root) {
@@ -502,45 +707,163 @@ fn scan_root(
             return;
         }
     };
+    let mut links = 0u64;
+    let mut unreadable = 0u64;
     for entry in read.flatten() {
-        let path = entry.path();
-        let Ok(meta) = fs::symlink_metadata(&path)
+        let Ok(meta) = entry.metadata()
         else {
+            unreadable += 1;
             continue;
         };
-        if !meta.is_dir() || platform::is_link_like(&meta) || meta.file_type().is_symlink() {
+        if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
+            links += 1;
             continue;
         }
-        let hits = probe_markers(&path);
-        let covered = declarations.iter().find(|item| item.accepted && safety::is_within(Path::new(&item.resolved), &path));
-        for (hit_path, markers) in &hits {
-            let bytes = safety::collect_usage(hit_path).bytes;
-            let covered_by = declarations.iter().find(|item| item.accepted && safety::is_within(Path::new(&item.resolved), hit_path));
-            probes.push(BuildOutputProbe {
-                path: hit_path.display().to_string(),
-                bytes,
-                markers: markers.clone(),
-                covered: covered_by.is_some(),
-                covered_by: covered_by.map(declaring_source),
-            });
+        if !meta.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+
+        // A hit ends the walk here: descending into a build output would only
+        // report the same bytes again under a nested name.
+        if let Some(evidence) = cargo_build_evidence(&path) {
+            let bytes = safety::collect_usage(&path).bytes;
+            output.measured.insert(safety::path_key(&path), bytes);
+            push_match(&path, bytes, evidence, declarations, output);
+            continue;
+        }
+
+        // Build output can sit below a container that is not one itself.
+        if depth > 1 && probe_below(&path, 2, depth, declarations, output) {
+            continue;
         }
 
         let usage = safety::collect_usage(&path);
+        if usage.errors > 0 {
+            unreadable += 1;
+        }
+        output.measured.insert(safety::path_key(&path), usage.bytes);
         if usage.bytes < min_bytes {
             continue;
         }
-        if covered.is_some() {
+        if declarations.iter().any(|item| item.accepted && safety::is_within(Path::new(&item.resolved), &path)) {
             continue;
         }
-        let markers: Vec<String> = hits.iter().flat_map(|(_, names)| names.iter().cloned()).collect::<BTreeSet<_>>().into_iter().collect();
+        let state = MarkerState::scan(&path);
         let partial = declarations.iter().find(|item| item.accepted && safety::is_within(&path, Path::new(&item.resolved)));
-        let note = match partial {
-            Some(item) => format!("only part of this directory is declared: {}", declaring_source(item)),
-            None if markers.is_empty() => "no declaration and no Cargo output marker: listed because of its size only".to_string(),
-            None => "Cargo output markers present but no declaration names this directory".to_string(),
+        let reason = match refusal(&path) {
+            Some(refusal_reason) => format!("{refusal_reason}, so this directory is never a candidate; {}", uncovered_reason(&state, partial)),
+            None => uncovered_reason(&state, partial),
         };
-        uncovered.push(UncoveredDirectory { path: path.display().to_string(), bytes: usage.bytes, markers, note });
+        output.uncovered.push(UncoveredDirectory {
+            path: path.display().to_string(),
+            bytes: usage.bytes,
+            evidence: state.evidence(),
+            reason,
+            also_in_build_roots: false,
+        });
     }
+    if links > 0 {
+        warnings.push(format!("{links} symbolic link(s) or junction(s) under {} were not followed", root.display()));
+    }
+    if unreadable > 0 {
+        warnings.push(format!("{unreadable} entries under {} could not be read, so some sizes are understated", root.display()));
+    }
+}
+
+/// Probe the direct children of a container, and deeper while `level < depth`.
+/// Returns `true` when anything at or below matched, so the container is then
+/// known to hold build output and is not listed as a gap of its own.
+fn probe_below(container: &Path, level: usize, depth: usize, declarations: &[BuildDirDeclaration], output: &mut ProbeOutput) -> bool {
+    let mut found = false;
+    for child in immediate_dirs(container) {
+        if let Some(evidence) = cargo_build_evidence(&child) {
+            let bytes = safety::collect_usage(&child).bytes;
+            output.measured.entry(safety::path_key(&child)).or_insert(bytes);
+            push_match(&child, bytes, evidence, declarations, output);
+            found = true;
+            continue;
+        }
+        if level < depth && probe_below(&child, level + 1, depth, declarations, output) {
+            found = true;
+        }
+    }
+    found
+}
+
+fn uncovered_reason(state: &MarkerState, partial: Option<&BuildDirDeclaration>) -> String {
+    if let Some(item) = partial {
+        return format!("only part of this directory is declared: {}", declaring_source(item));
+    }
+    match (state.tag.is_some(), state.has_cargo_marker()) {
+        (true, false) => format!("{TAG_NAME} alone is not enough: a Cargo-specific marker is missing"),
+        (false, true) => "a Cargo-specific marker exists but CACHEDIR.TAG is missing, so the rule does not apply".to_string(),
+        _ => "neither CACHEDIR.TAG nor a Cargo-specific marker at this directory, so it is listed because of its size only (output below the probe depth is not inspected)".to_string(),
+    }
+}
+
+/// Read the separate build-root config only to compare it, never to merge it.
+fn build_root_declarations(config: Option<&Path>, warnings: &mut Vec<String>) -> (Vec<crate::anchors::BuildRootDeclaration>, Option<String>) {
+    let Some(path) = config.map(Path::to_path_buf)
+    else {
+        warnings.push("no build-root config path, so the separate source cannot be compared".to_string());
+        return (Vec::new(), None);
+    };
+    match fs::read_to_string(&path) {
+        Ok(text) => {
+            let parsed = crate::anchors::parse_build_root_config(&text, &path.display().to_string());
+            (parsed.declarations, Some(parsed.config_path))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            warnings.push(format!("build-root config not found, nothing to compare: {}", path.display()));
+            (Vec::new(), None)
+        }
+        Err(error) => {
+            warnings.push(format!("cannot read build-root config {}: {error}", path.display()));
+            (Vec::new(), None)
+        }
+    }
+}
+
+fn compare_build_roots(
+    declarations: Vec<crate::anchors::BuildRootDeclaration>,
+    matches: &mut [BuildOutputMatch],
+    measured: &BTreeMap<String, u64>,
+) -> Vec<BuildRootOverlap> {
+    let mut overlaps = Vec::new();
+    for declaration in declarations {
+        let declared = PathBuf::from(&declaration.path);
+        let exists = declared.is_dir();
+        let bytes = measured.get(&safety::path_key(&declared)).copied();
+        let covers = matches.iter().filter(|item| safety::is_within(&declared, Path::new(&item.path))).count();
+        let inside = matches.iter().any(|item| safety::is_within(Path::new(&item.path), &declared));
+        if covers > 0 {
+            for item in matches.iter_mut().filter(|item| safety::is_within(&declared, Path::new(&item.path))) {
+                item.also_in_build_roots = true;
+            }
+        }
+        let note = if covers > 0 {
+            format!("{covers} marker match(es) inside this declared path are already counted by build-roots")
+        }
+        else if inside {
+            "a marker match contains this declared path, so the overlap is partial and not subtracted".to_string()
+        }
+        else if bytes.is_none() {
+            "no marker match, and the path lies outside every probe root so it was not measured here".to_string()
+        }
+        else {
+            "no marker match".to_string()
+        };
+        overlaps.push(BuildRootOverlap {
+            path: declaration.path,
+            line: declaration.line,
+            exists,
+            bytes,
+            matched_by_markers: covers > 0 || inside,
+            note,
+        });
+    }
+    overlaps
 }
 
 /// One `build.target-dir` occurrence with its 1-based line number.
@@ -684,7 +1007,12 @@ mod tests {
 
     fn report(cwd: &Path, env_value: Option<&str>, dirs: &BaseDirs) -> BuildDirReport {
         let env = move |key: &str| if key == ENV_KEY { env_value.map(str::to_string) } else { None };
-        build_dir_report(BuildDirOptions { cwd: Some(cwd.display().to_string()), ..BuildDirOptions::default() }, &env, dirs).unwrap()
+        build_dir_report(BuildDirOptions { cwd: Some(cwd.display().to_string()), ..BuildDirOptions::default() }, &env, dirs, None).unwrap()
+    }
+
+    fn probe_report(root: &Path, config: Option<&Path>, options: BuildDirOptions) -> BuildDirReport {
+        let options = BuildDirOptions { cwd: Some(root.display().to_string()), roots: vec![root.display().to_string()], ..options };
+        build_dir_report(options, &no_env, &empty_dirs(), config).unwrap()
     }
 
     fn write(path: &Path, text: &str) {
@@ -819,40 +1147,131 @@ mod tests {
         assert!(validate_location(Path::new(r"C:\")).is_err());
     }
 
+    fn tag(dir: &Path) {
+        write(&dir.join(TAG_NAME), "Signature: 8a477f597d28d172789f06886806bc55");
+    }
+
     #[test]
-    fn probes_mark_directories_and_uncovered_entries_carry_markers() {
-        let root = synthetic_root("probe");
-        let covered = root.join("declared-output");
-        fs::create_dir_all(covered.join("debug")).unwrap();
-        write(&covered.join(".rustc_info.json"), "{}");
-        write(&covered.join("CACHEDIR.TAG"), "Signature: sample");
-        write(&covered.join("debug").join(".fingerprint").join("x"), "x");
-        let loose = root.join("loose-output");
-        write(&loose.join(".rustc_info.json"), "{}");
-        write(&loose.join("blob.bin"), &"x".repeat(4096));
+    fn the_tag_alone_is_never_enough_and_a_cargo_marker_alone_is_never_enough() {
+        let root = synthetic_root("markers");
+
+        let with_info = root.join("with-info");
+        tag(&with_info);
+        write(&with_info.join(".rustc_info.json"), "{}");
+        write(&with_info.join("blob.bin"), &"x".repeat(4096));
+
+        let with_fingerprint = root.join("with-fingerprint");
+        tag(&with_fingerprint);
+        write(&with_fingerprint.join("release").join(FINGERPRINT_DIR).join("sample"), "x");
+
+        let tag_only = root.join("tag-only");
+        tag(&tag_only);
+        write(&tag_only.join("blob.bin"), &"x".repeat(4096));
+
+        let marker_only = root.join("marker-only");
+        write(&marker_only.join(".rustc_info.json"), "{}");
+        write(&marker_only.join("blob.bin"), &"x".repeat(4096));
+
         let quiet = root.join("quiet-empty");
         fs::create_dir_all(&quiet).unwrap();
 
-        let config = root.join(".cargo");
-        write(&config.join("config.toml"), &format!("[build]\ntarget-dir = '{}'\n", covered.display()));
-        let report = build_dir_report(
-            BuildDirOptions { cwd: Some(root.display().to_string()), roots: vec![root.display().to_string()], min_bytes: 1 },
-            &no_env,
-            &empty_dirs(),
-        )
-        .unwrap();
+        let report = probe_report(&root, None, BuildDirOptions { min_bytes: 1, ..BuildDirOptions::default() });
 
-        let covered_probe = report.probes.iter().find(|probe| probe.path == covered.display().to_string()).unwrap();
-        assert!(covered_probe.covered);
-        assert!(covered_probe.covered_by.as_deref().unwrap().contains("declared-output"));
-        assert!(covered_probe.markers.contains(&".rustc_info.json".to_string()));
+        let matched: Vec<&str> = report.matches.iter().map(|item| item.path.as_str()).collect();
+        assert!(matched.contains(&with_info.display().to_string().as_str()), "tag plus .rustc_info.json must match");
+        assert!(matched.contains(&with_fingerprint.display().to_string().as_str()), "tag plus */release/.fingerprint must match");
+        assert!(!matched.contains(&tag_only.display().to_string().as_str()), "CACHEDIR.TAG is written by other tools too");
+        assert!(!matched.contains(&marker_only.display().to_string().as_str()), "a Cargo marker without the tag is not a proof");
+        assert!(report.matches.iter().all(|item| item.attribution == MatchAttribution::CargoMarkers));
 
-        let uncovered = report.uncovered.iter().find(|item| item.path == loose.display().to_string()).unwrap();
-        assert!(uncovered.markers.contains(&".rustc_info.json".to_string()));
-        assert!(!uncovered.note.contains("only part"));
-        assert!(!report.uncovered.iter().any(|item| item.path == covered.display().to_string()));
+        let evidence = &report.matches.iter().find(|item| item.path == with_info.display().to_string()).unwrap().evidence;
+        assert!(evidence.iter().any(|value| value.ends_with(TAG_NAME)), "{evidence:?}");
+        assert!(evidence.iter().any(|value| value.ends_with("rustc_info.json")), "{evidence:?}");
+        assert!(evidence.iter().all(|value| Path::new(value).is_absolute()), "{evidence:?}");
+
+        let uncovered = report.uncovered.iter().find(|item| item.path == tag_only.display().to_string()).unwrap();
+        assert!(uncovered.reason.contains("CACHEDIR.TAG alone is not enough"), "{}", uncovered.reason);
+        assert!(uncovered.evidence.iter().any(|value| value.ends_with(TAG_NAME)));
+        assert_eq!(uncovered.bytes, 4096 + "Signature: 8a477f597d28d172789f06886806bc55".len() as u64);
+
+        let marker = report.uncovered.iter().find(|item| item.path == marker_only.display().to_string()).unwrap();
+        assert!(marker.reason.contains("CACHEDIR.TAG is missing"), "{}", marker.reason);
         assert!(!report.uncovered.iter().any(|item| item.path == quiet.display().to_string()));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_match_is_never_descended_into_so_inner_directories_are_not_reported_twice() {
+        let root = synthetic_root("nested");
+        let container = root.join("container");
+        let inner = container.join("inner-output");
+        tag(&inner);
+        write(&inner.join(".rustc_info.json"), "{}");
+        write(&inner.join("blob.bin"), &"x".repeat(4096));
+        let deeper = inner.join("debug");
+        write(&deeper.join(FINGERPRINT_DIR).join("sample"), "x");
+        write(&deeper.join("blob.bin"), &"x".repeat(4096));
+
+        let report = probe_report(&root, None, BuildDirOptions { min_bytes: 1, ..BuildDirOptions::default() });
+
+        assert_eq!(report.matches.len(), 1, "one match only: {:?}", report.matches.iter().map(|item| &item.path).collect::<Vec<_>>());
+        assert_eq!(report.matches[0].path, inner.display().to_string());
+        assert!(!report.matches.iter().any(|item| item.path == deeper.display().to_string()));
+        assert!(!report.uncovered.iter().any(|item| item.path == container.display().to_string()));
+        assert_eq!(report.matched_bytes, report.matches[0].bytes);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_same_directory_found_under_two_roots_is_counted_once() {
+        let root = synthetic_root("dedupe");
+        let output = root.join("same-output");
+        tag(&output);
+        write(&output.join(".rustc_info.json"), "{}");
+        write(&output.join("blob.bin"), &"x".repeat(4096));
+
+        let options = BuildDirOptions {
+            roots: vec![root.display().to_string(), root.display().to_string(), output.display().to_string()],
+            min_bytes: 1,
+            ..BuildDirOptions::default()
+        };
+        let report =
+            build_dir_report(BuildDirOptions { cwd: Some(root.display().to_string()), ..options }, &no_env, &empty_dirs(), None).unwrap();
+
+        assert_eq!(report.matches.len(), 1);
+        assert_eq!(report.matched_bytes, report.matches[0].bytes);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_declaration_that_covers_a_match_is_named_in_the_entry() {
+        let root = synthetic_root("covered");
+        let output = root.join("declared-output");
+        tag(&output);
+        write(&output.join(".rustc_info.json"), "{}");
+        write(&output.join("blob.bin"), &"x".repeat(4096));
+        write(&root.join(".cargo").join("config.toml"), &format!("[build]\ntarget-dir = '{}'\n", output.display()));
+
+        let report = probe_report(&root, None, BuildDirOptions { min_bytes: 1, ..BuildDirOptions::default() });
+
+        let entry = &report.matches[0];
+        let source = entry.covered_by_declaration.as_deref().unwrap();
+        assert!(source.contains(ENV_KEY) || source.contains(".cargo"), "{source}");
+        assert!(source.contains(&output.display().to_string()), "{source}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_proven_directory_inside_a_refused_location_is_reported_as_rejected() {
+        assert!(refusal(Path::new(r"C:\")).is_some());
+        assert!(refusal(Path::new(r"C:\Windows\sample")).is_some());
+
+        let mut output = ProbeOutput::default();
+        let evidence = vec![PathBuf::from(r"C:\Windows\sample").join(TAG_NAME)];
+        push_match(Path::new(r"C:\Windows\sample"), 1, evidence, &[], &mut output);
+        assert!(output.matches.is_empty());
+        assert_eq!(output.rejected.len(), 1);
+        assert!(output.rejected[0].reason.contains("system"));
     }
 
     #[test]
@@ -861,18 +1280,74 @@ mod tests {
         let parent = root.join("parent-output");
         fs::create_dir_all(parent.join("nested")).unwrap();
         write(&parent.join("blob.bin"), &"x".repeat(4096));
-        let config = root.join(".cargo");
-        write(&config.join("config.toml"), &format!("[build]\ntarget-dir = '{}'\n", parent.join("nested").display()));
+        write(&root.join(".cargo").join("config.toml"), &format!("[build]\ntarget-dir = '{}'\n", parent.join("nested").display()));
 
-        let report = build_dir_report(
-            BuildDirOptions { cwd: Some(root.display().to_string()), roots: vec![root.display().to_string()], min_bytes: 1 },
-            &no_env,
-            &empty_dirs(),
-        )
-        .unwrap();
+        let report = probe_report(&root, None, BuildDirOptions { min_bytes: 1, ..BuildDirOptions::default() });
 
         let entry = report.uncovered.iter().find(|item| item.path == parent.display().to_string()).unwrap();
-        assert!(entry.note.contains("only part of this directory is declared"));
+        assert!(entry.reason.contains("only part of this directory is declared"), "{}", entry.reason);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_build_root_entry_already_counted_elsewhere_is_not_counted_twice() {
+        let root = synthetic_root("overlap");
+        let shared = root.join("shared-output");
+        tag(&shared);
+        write(&shared.join(".rustc_info.json"), "{}");
+        write(&shared.join("blob.bin"), &"x".repeat(4096));
+        let other = root.join("other-output");
+        tag(&other);
+        write(&other.join(".rustc_info.json"), "{}");
+        write(&other.join("blob.bin"), &"x".repeat(2048));
+
+        let config = root.join("build-roots.conf");
+        let gap = root.join("large-gap");
+        write(&gap.join("blob.bin"), &"x".repeat(8192));
+        write(&config, &format!("# shared build outputs\n{}\n{}\n{}\n", shared.display(), root.join("absent").display(), gap.display()));
+
+        let report = probe_report(&root, Some(&config), BuildDirOptions { min_bytes: 1, ..BuildDirOptions::default() });
+
+        assert_eq!(report.build_root_config.as_deref(), Some(config.display().to_string().as_str()));
+        assert_eq!(report.matches.len(), 2);
+        assert!(report.matches.iter().find(|item| item.path == shared.display().to_string()).unwrap().also_in_build_roots);
+        assert!(!report.matches.iter().find(|item| item.path == other.display().to_string()).unwrap().also_in_build_roots);
+
+        let shared_bytes = report.matches.iter().find(|item| item.path == shared.display().to_string()).unwrap().bytes;
+        assert_eq!(
+            report.matched_bytes,
+            shared_bytes + report.matches.iter().find(|item| item.path == other.display().to_string()).unwrap().bytes
+        );
+        assert_eq!(report.matched_bytes_in_build_roots, shared_bytes);
+        assert_eq!(report.unique_matched_bytes, report.matched_bytes - shared_bytes);
+
+        let declared: Vec<&BuildRootOverlap> = report.build_roots.iter().collect();
+        assert_eq!(declared.len(), 3);
+        assert_eq!(declared[0].line, 2);
+        assert!(declared[0].matched_by_markers);
+        assert!(declared[0].bytes.is_some(), "a declared path inside a probe root is measured");
+        assert!(declared[0].note.contains("already counted by build-roots"));
+        assert!(!declared[1].exists);
+        assert!(!declared[1].matched_by_markers);
+        assert!(declared[1].bytes.is_none());
+
+        let gap_entry = report.uncovered.iter().find(|item| item.path == gap.display().to_string()).unwrap();
+        assert!(gap_entry.also_in_build_roots, "a build-roots declaration must be visible on the gap entry");
+        assert!(!report.uncovered.iter().any(|item| item.path == shared.display().to_string()));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn depth_one_only_inspects_the_direct_children_of_a_root() {
+        let root = synthetic_root("depth");
+        let container = root.join("container");
+        let inner = container.join("inner-output");
+        tag(&inner);
+        write(&inner.join(".rustc_info.json"), "{}");
+
+        let report = probe_report(&root, None, BuildDirOptions { min_bytes: 1, depth: 1, ..BuildDirOptions::default() });
+
+        assert!(report.matches.is_empty(), "depth 1 must not look below a root's children");
         let _ = fs::remove_dir_all(&root);
     }
 

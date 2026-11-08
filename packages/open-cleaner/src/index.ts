@@ -174,8 +174,9 @@ export function buildRootPlan(options: BuildRootOptions = {}): BuildRootPlan {
 }
 
 /**
- * Read-only discovery of explicit Cargo target directories: the
- * `CARGO_TARGET_DIR` variable and `build.target-dir` in Cargo config files.
+ * Read-only discovery of Cargo build output: explicit declarations
+ * (`CARGO_TARGET_DIR` and `build.target-dir`), plus directories under explicit
+ * probe roots proven by `CACHEDIR.TAG` together with a Cargo-specific marker.
  * There is no plan or delete counterpart for this report.
  */
 export function buildDirScan(options: BuildDirOptions = {}): BuildDirReport {
@@ -191,7 +192,10 @@ export type {
     BuildDirDeclaration,
     BuildDirOptions,
     BuildDirReport,
-    BuildOutputProbe,
+    BuildOutputMatch,
+    BuildRootOverlap,
+    MatchAttribution,
+    RejectedDirectory,
     UncoveredDirectory,
 } from './native.js';
 
