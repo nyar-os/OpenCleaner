@@ -366,7 +366,7 @@ pub fn dev_plan(options: DevScanOptions, mode: DeleteMode) -> Result<DevPlan> {
         warnings.push(format!("candidates span multiple volumes: {}", volumes.into_iter().collect::<Vec<_>>().join(", ")));
     }
     if mode == DeleteMode::Trash {
-        warnings.push("recycle bins are per volume; each moved item goes to the bin on its own volume".to_string());
+        warnings.push(safety::TRASH_VOLUME_NOTE.to_string());
     }
 
     Ok(DevPlan {

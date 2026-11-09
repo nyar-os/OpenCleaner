@@ -316,6 +316,9 @@ fn build_dir_report(
 
     let mut output = ProbeOutput::default();
     let base_depth = options.resolved_depth();
+    if let Some(warning) = temp_coverage_warning(&roots, base_depth) {
+        warnings.push(warning);
+    }
     let mut depth_by_root = Vec::with_capacity(roots.len());
     for root in &roots {
         let depth = effective_depth(root, base_depth);
@@ -594,6 +597,28 @@ fn default_depth() -> usize {
 /// would start walking user profiles and system directories if it were raised.
 fn effective_depth(root: &Path, base: usize) -> usize {
     if safety::path_key(root) == safety::path_key(&std::env::temp_dir()) { base.max(TEMP_ROOT_DEPTH) } else { base }
+}
+
+/// The temp directory is where one-shot clones accumulate, and only the temp
+/// root itself receives the deeper probe. When a probe root contains the temp
+/// directory without being it, the output inside the temp directory sits past
+/// that root's reach, and a plan that silently misses it reads as complete.
+/// A real run on a full disk lost 62 GB of marker-proven output this way, so
+/// the gap is reported instead of guessed at.
+fn temp_coverage_warning(roots: &[PathBuf], base_depth: usize) -> Option<String> {
+    let temp = std::env::temp_dir();
+    let temp_key = safety::path_key(&temp);
+    if roots.iter().any(|root| safety::path_key(root) == temp_key) {
+        return None;
+    }
+    let containing = roots.iter().find(|root| safety::is_within(root, &temp) && safety::path_key(root) != temp_key)?;
+    let levels = temp.components().count().saturating_sub(containing.components().count());
+    let depth = effective_depth(containing, base_depth);
+    Some(format!(
+        "the temp directory {} sits {levels} level(s) below probe root {} while this probe reaches {depth} level(s): marker-proven build output inside the temp directory is not covered unless the temp directory is passed as its own --root",
+        temp.display(),
+        containing.display()
+    ))
 }
 
 fn child_dir(entry: &fs::DirEntry) -> Option<PathBuf> {
@@ -1412,6 +1437,9 @@ fn build_dir_plan_with(
     if !mode_supported {
         warnings.push(format!("delete mode {mode:?} is not available on this platform or build, so execution will fail"));
     }
+    if mode == DeleteMode::Trash {
+        warnings.push(crate::safety::TRASH_VOLUME_NOTE.to_string());
+    }
 
     Ok(BuildDirPlan {
         cwd: report.cwd,
@@ -2180,6 +2208,41 @@ mod tests {
         assert_eq!(report.depth_by_root.len(), 1);
         assert_eq!(report.depth_by_root[0].path, root.display().to_string());
         assert_eq!(report.depth_by_root[0].depth, default_depth(), "a normal root keeps the caller depth");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A probe root that merely contains the temp directory cannot reach the
+    /// one-shot clones inside it, and the plan must say so instead of reading
+    /// complete. The temp directory itself as a root needs no such warning.
+    #[test]
+    fn a_probe_root_around_the_temp_directory_reports_its_coverage_gap() {
+        let temp = std::env::temp_dir();
+        let parent = temp.parent().expect("the temp directory has a parent");
+        let warning = temp_coverage_warning(&[parent.to_path_buf()], default_depth()).expect("a containing root warns");
+        assert!(warning.contains("its own --root"), "{warning}");
+
+        assert!(temp_coverage_warning(std::slice::from_ref(&temp), default_depth()).is_none(), "the temp root itself is probed deeper");
+        assert!(temp_coverage_warning(&[], default_depth()).is_none(), "no probe roots means no coverage claim");
+        let outside = synthetic_root("coverage-outside");
+        assert!(
+            temp_coverage_warning(std::slice::from_ref(&outside), default_depth()).is_none(),
+            "a root inside the temp directory does not contain it"
+        );
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn a_trash_mode_plan_warns_that_the_bin_frees_no_space_on_this_volume() {
+        let root = synthetic_root("trash-warning");
+        let output = root.join("output");
+        proven_output(&output);
+        age_tree(&output, 1);
+
+        let plan = plan_with(&root, None, None, DeleteMode::Trash);
+        assert!(plan.warnings.iter().any(|warning| warning.contains("frees no space")), "{:?}", plan.warnings);
+
+        let permanent = plan_with(&root, None, None, DeleteMode::Permanent);
+        assert!(permanent.warnings.iter().all(|warning| !warning.contains("frees no space")), "{:?}", permanent.warnings);
         let _ = fs::remove_dir_all(&root);
     }
 

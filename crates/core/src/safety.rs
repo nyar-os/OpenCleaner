@@ -25,6 +25,12 @@ const PROTECTED_COMPONENTS: &[&str] =
 /// Days used when a caller does not choose a threshold for file age.
 pub(crate) const DEFAULT_AGE_DAYS: u64 = 7;
 
+/// Every plan executed in trash mode must say this. A recycle bin lives on the
+/// same volume as the item it received, so trashing files on a full volume
+/// frees no space there until the bin is emptied. An operator cleaning a full
+/// disk otherwise watches a successful run reclaim nothing.
+pub(crate) const TRASH_VOLUME_NOTE: &str = "recycle bins are per volume: trash mode moves each item to the bin on its own volume and frees no space there until the bin is emptied; choose permanent deletion when the goal is space on this volume";
+
 /// Length of one day in milliseconds. Defined once so every age and freshness
 /// computation compares the same unit.
 pub(crate) const DAY_MS: u64 = 24 * 60 * 60 * 1000;
