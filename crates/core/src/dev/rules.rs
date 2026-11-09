@@ -364,10 +364,7 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("open-cleaner-rules-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::fixtures::fixture_dir(&format!("rules-{name}"))
     }
 
     fn touch(path: &Path, bytes: usize) {

@@ -37,7 +37,14 @@ fn main() {
     let generated = !args.contains_key("--root");
     let root = match args.get("--root") {
         Some(path) => PathBuf::from(path),
-        None => env::temp_dir().join("open-cleaner-bench"),
+        // The generated corpus stays under the build directory: a benchmark
+        // must not write into the user's temp directory it may also be cleaning.
+        None => std::env::current_exe()
+            .ok()
+            .and_then(|exe| {
+                exe.parent().and_then(|examples| examples.parent()).map(|profile| profile.join("test-tmp").join("open-cleaner-bench"))
+            })
+            .unwrap_or_else(|| env::temp_dir().join("open-cleaner-bench")),
     };
 
     if generated {

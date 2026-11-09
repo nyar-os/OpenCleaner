@@ -13,6 +13,8 @@ pub mod build_dirs;
 pub mod dev;
 pub mod env;
 mod error;
+#[cfg(test)]
+mod fixtures;
 pub mod locations;
 pub mod platform;
 pub mod registry;

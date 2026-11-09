@@ -296,7 +296,11 @@ fn declared_build_roots(warnings: &mut Vec<String>) -> Vec<PathBuf> {
     config.declarations.into_iter().map(|entry| PathBuf::from(entry.path)).filter(|path| path.is_absolute()).collect()
 }
 
-fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOutput> {
+/// The process-path shields are injected so a plan can be reproduced without
+/// depending on which programs happen to run on the machine: an IDE whose
+/// working directory is an ancestor of the fixture root would otherwise
+/// shield the whole tree and turn a hermetic test into a host probe.
+fn walk_with(root: &Path, threshold_days_value: u64, cutoff_ms: u64, paths: ProcessPaths) -> Result<ScanOutput> {
     // A root that carries an anchor is a project checkout. Its files belong to
     // the project and its artifacts belong to the dev domain, so it is rejected
     // instead of being treated as a temp directory full of unrelated files.
@@ -306,7 +310,6 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
             root.display()
         )));
     }
-    let paths = safety::process_paths();
     let temp_dirs: Vec<PathBuf> = paths
         .temp_dirs
         .iter()
@@ -469,6 +472,10 @@ fn group_by<F: Fn(&Candidate) -> String>(candidates: &[Candidate], key: F) -> Ve
 /// Read-only plan. Occupancy is probed per file, and probed files are counted,
 /// never deleted.
 pub fn temp_plan(options: TempOptions) -> Result<TempPlan> {
+    plan_with(options, safety::process_paths())
+}
+
+fn plan_with(options: TempOptions, paths: ProcessPaths) -> Result<TempPlan> {
     let root = resolve_root(options.root.as_deref());
     let meta = safety::ensure_cleanup_root(&root, "temp-plan")?;
     if !meta.is_dir() {
@@ -476,7 +483,7 @@ pub fn temp_plan(options: TempOptions) -> Result<TempPlan> {
     }
     let older_than_days = threshold_days(options.older_than_days);
     let cutoff_ms = safety::now_unix_ms();
-    let scanned = walk(&root, older_than_days, cutoff_ms)?;
+    let scanned = walk_with(&root, older_than_days, cutoff_ms, paths)?;
 
     let mut accepted = Vec::new();
     let mut skipped = scanned.skipped;
@@ -535,6 +542,10 @@ fn clean_item(path: &Path, bytes: u64, status: &str, reason: &str) -> TempCleanI
 /// re-validated, re-probed, and reported individually with its outcome so a
 /// caller can show which file was deleted, which was skipped and why.
 pub fn temp_clean(options: TempCleanOptions) -> Result<TempCleanReport> {
+    clean_with(options, safety::process_paths())
+}
+
+fn clean_with(options: TempCleanOptions, paths: ProcessPaths) -> Result<TempCleanReport> {
     if !options.confirm {
         return Err(Error::Message("temp-clean: refusing to delete without confirm".to_string()));
     }
@@ -544,7 +555,7 @@ pub fn temp_clean(options: TempCleanOptions) -> Result<TempCleanReport> {
     let cutoff_ms = options.cutoff_unix_ms.ok_or_else(|| Error::Message("temp-clean: cutoff_unix_ms is required".to_string()))?;
     let cutoff_ms = cutoff_ms.min(safety::now_unix_ms());
     let threshold_ms = older_than_days * safety::DAY_MS;
-    let scanned = walk(&root, older_than_days, cutoff_ms)?;
+    let scanned = walk_with(&root, older_than_days, cutoff_ms, paths)?;
     let warnings = scanned.warnings;
 
     let mut skipped = scanned.skipped;
@@ -628,9 +639,7 @@ mod tests {
     use std::io::Write;
 
     fn unique_root(label: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("open-cleaner-test-{label}-{}-{}", std::process::id(), safety::now_unix_ms()));
-        std::fs::create_dir_all(&root).expect("create fixture root");
-        root
+        crate::fixtures::fixture_dir(&format!("test-{label}"))
     }
 
     fn write_file(path: &Path, bytes: usize, age_days: u64) {
@@ -649,8 +658,11 @@ mod tests {
         write_file(&root.join("old.bin"), 4096, 20);
         write_file(&root.join("older.log"), 2048, 40);
         write_file(&root.join("fresh.tmp"), 1024, 0);
-        let report =
-            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        let report = plan_with(
+            TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) },
+            ProcessPaths::default(),
+        )
+        .expect("plan");
         assert_eq!(report.candidate_files, 2);
         assert_eq!(report.candidate_bytes, 6144);
         assert_eq!(report.skipped.recent, 1);
@@ -667,14 +679,20 @@ mod tests {
         let fresh = root.join("fresh.tmp");
         write_file(&old, 1024, 20);
         write_file(&fresh, 1024, 0);
-        let plan =
-            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
-        let report = temp_clean(TempCleanOptions {
-            root: Some(root.display().to_string()),
-            older_than_days: Some(7),
-            cutoff_unix_ms: Some(plan.cutoff_unix_ms),
-            confirm: true,
-        })
+        let plan = plan_with(
+            TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) },
+            ProcessPaths::default(),
+        )
+        .expect("plan");
+        let report = clean_with(
+            TempCleanOptions {
+                root: Some(root.display().to_string()),
+                older_than_days: Some(7),
+                cutoff_unix_ms: Some(plan.cutoff_unix_ms),
+                confirm: true,
+            },
+            ProcessPaths::default(),
+        )
         .expect("clean");
         assert_eq!(report.deleted_files, 1);
         assert_eq!(report.items.len(), 1);
@@ -691,8 +709,11 @@ mod tests {
         let root = unique_root("temp-dir-recent");
         write_file(&root.join("active").join("stale.bin"), 1024, 60);
         write_file(&root.join("active").join("fresh.log"), 512, 0);
-        let report =
-            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        let report = plan_with(
+            TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) },
+            ProcessPaths::default(),
+        )
+        .expect("plan");
         assert_eq!(report.candidate_files, 0);
         assert_eq!(report.skipped.dir_recent, 1);
         assert_eq!(report.skipped.dir_recent_bytes, 1024, "a held-back stale file reports its bytes");
@@ -703,8 +724,11 @@ mod tests {
     fn stale_directory_without_newer_content_stays_a_candidate() {
         let root = unique_root("temp-dir-idle");
         write_file(&root.join("idle").join("stale.bin"), 1024, 60);
-        let report =
-            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        let report = plan_with(
+            TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) },
+            ProcessPaths::default(),
+        )
+        .expect("plan");
         assert_eq!(report.candidate_files, 1);
         assert_eq!(report.skipped.dir_recent, 0);
         std::fs::remove_dir_all(&root).ok();
@@ -715,8 +739,11 @@ mod tests {
         let root = unique_root("temp-dir-nested");
         write_file(&root.join("active").join("fresh.log"), 512, 0);
         write_file(&root.join("active").join("nested").join("stale.bin"), 1024, 60);
-        let report =
-            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        let report = plan_with(
+            TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) },
+            ProcessPaths::default(),
+        )
+        .expect("plan");
         assert_eq!(report.candidate_files, 0);
         assert_eq!(report.skipped.dir_recent, 1);
         std::fs::remove_dir_all(&root).ok();
@@ -732,8 +759,11 @@ mod tests {
         write_file(&root.join("mixed").join("sixty-days.bin"), 1024, 60);
         write_file(&root.join("active").join("three-days.log"), 512, 3);
         write_file(&root.join("active").join("sixty-days.bin"), 1024, 60);
-        let report =
-            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        let report = plan_with(
+            TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) },
+            ProcessPaths::default(),
+        )
+        .expect("plan");
         let candidates: Vec<&str> = report.samples.iter().map(|sample| sample.path.as_str()).collect();
         assert_eq!(report.candidate_files, 2, "{candidates:?}");
         assert!(candidates.iter().any(|path| path.contains("mixed") && path.ends_with("ten-days.log")), "{candidates:?}");
@@ -752,8 +782,11 @@ mod tests {
         let root = unique_root("temp-root-project");
         write_file(&root.join("package.json"), 8, 60);
         write_file(&root.join("old.log"), 1024, 60);
-        let error = temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) })
-            .expect_err("a project root must be rejected");
+        let error = plan_with(
+            TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) },
+            ProcessPaths::default(),
+        )
+        .expect_err("a project root must be rejected");
         assert!(error.to_string().contains("manifest anchor"), "{error}");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -764,8 +797,11 @@ mod tests {
         write_file(&root.join("project").join("stale.bin"), 1024, 60);
         write_file(&root.join("project").join("package.json"), 8, 60);
         write_file(&root.join("plain").join("stale.bin"), 1024, 60);
-        let report =
-            temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
+        let report = plan_with(
+            TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) },
+            ProcessPaths::default(),
+        )
+        .expect("plan");
         assert_eq!(report.candidate_files, 1);
         assert_eq!(report.skipped.dev_root, 1);
         std::fs::remove_dir_all(&root).ok();

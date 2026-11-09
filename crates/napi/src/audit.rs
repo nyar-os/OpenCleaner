@@ -140,7 +140,15 @@ mod tests {
 
     fn test_auditor() -> (Auditor, PathBuf) {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("open-cleaner-audit-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
+        // Fixtures live under the build directory, never in the user's temp.
+        let base = match std::env::var_os("CARGO_TARGET_TMPDIR") {
+            Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+            _ => std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().and_then(|deps| deps.parent()).map(|profile| profile.join("test-tmp")))
+                .unwrap_or_else(std::env::temp_dir),
+        };
+        let dir = base.join(format!("open-cleaner-audit-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
         let actor = Actor { kind: ActorKind::Agent, id: "agent-1".into(), source: "test".into() };
         let auditor = Auditor::builder(APP, "0.0.0").actor(actor).session("session-1").host("host-1").dir(&dir).build();
         (auditor, dir)

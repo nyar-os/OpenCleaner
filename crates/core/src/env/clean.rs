@@ -292,10 +292,7 @@ mod tests {
     }
 
     fn fixture(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("open-cleaner-env-clean-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        root
+        crate::fixtures::fixture_dir(&format!("env-clean-{name}"))
     }
 
     const PATH: &str = r"C:\Windows;C:\Gone\bin;C:\Windows;C:\Old\bin";

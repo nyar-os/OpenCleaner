@@ -1701,10 +1701,7 @@ mod tests {
     }
 
     fn synthetic_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("open-cleaner-build-dirs-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        root
+        crate::fixtures::fixture_dir(&format!("build-dirs-{name}"))
     }
 
     #[test]

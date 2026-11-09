@@ -70,12 +70,7 @@ mod tests {
 
     #[test]
     fn moves_a_probe_directory_into_the_recycle_bin() {
-        let dir = std::env::temp_dir().join(format!(
-            "open-cleaner-trash-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fixtures::fixture_dir("trash-probe");
         fs::write(dir.join("payload.txt"), b"fixture").unwrap();
 
         trash_path(&dir).unwrap();

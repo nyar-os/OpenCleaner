@@ -355,9 +355,7 @@ mod tests {
     }
 
     fn fixture_root(label: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("open-cleaner-anchors-{label}-{}", safety::now_unix_ms()));
-        std::fs::create_dir_all(&root).expect("create fixture root");
-        root
+        crate::fixtures::fixture_dir(&format!("anchors-{label}"))
     }
 
     /// A declared root is removed whole, so a checkout at its top or one or two

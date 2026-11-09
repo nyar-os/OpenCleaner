@@ -157,8 +157,7 @@ mod tests {
 
     #[test]
     fn scans_fixture_directory() {
-        let dir = std::env::temp_dir().join(format!("open-cleaner-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = crate::fixtures::fixture_dir("scan");
         fs::create_dir_all(dir.join("cache")).unwrap();
         {
             let mut f = fs::File::create(dir.join("cache").join("a.bin")).unwrap();
@@ -183,8 +182,7 @@ mod tests {
 
     #[test]
     fn unreadable_subtrees_are_skipped_and_reported() {
-        let dir = std::env::temp_dir().join(format!("open-cleaner-unreadable-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = crate::fixtures::fixture_dir("scan-unreadable");
         fs::create_dir_all(dir.join("free").join("nested")).unwrap();
         fs::create_dir_all(dir.join("locked")).unwrap();
         fs::create_dir_all(dir.join("free").join("locked")).unwrap();

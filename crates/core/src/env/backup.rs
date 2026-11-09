@@ -120,8 +120,7 @@ mod tests {
 
     #[test]
     fn backup_files_are_written_outside_the_working_directory() {
-        let dir = std::env::temp_dir().join(format!("open-cleaner-env-backup-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = crate::fixtures::fixture_dir("env-backup");
         let request = BackupRequest {
             scope: PathScope::User,
             original: r"C:\Windows;%USERPROFILE%\bin",
