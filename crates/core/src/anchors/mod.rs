@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Error, Result,
     locations::base_dirs,
+    platform,
     safety::{self, RECENT_WRITE_MS},
 };
 
@@ -137,6 +138,36 @@ fn authorization_label(config_path: &str, line: u64) -> String {
     format!("line {line} of {config_path}")
 }
 
+/// A declared root is removed whole, so a git working tree near its top can
+/// hold uncommitted work the operator never meant to declare. The scan is
+/// deliberately shallow: a checkout is marked by `.git` within the first
+/// levels, and going deeper would walk the very caches this domain removes.
+/// A real cleanup found 51 uncommitted files inside a detached checkout one
+/// level below a declared root; nothing in the tool would have stopped it.
+fn find_git_working_tree(root: &Path, depth: usize) -> Option<PathBuf> {
+    let direct = root.join(".git");
+    if direct.exists() {
+        return Some(root.to_path_buf());
+    }
+    if depth == 0 {
+        return None;
+    }
+    let read = std::fs::read_dir(root).ok()?;
+    for entry in read.flatten() {
+        let Ok(meta) = entry.metadata()
+        else {
+            continue;
+        };
+        if !meta.is_dir() || platform::is_link_like(&meta) || meta.file_type().is_symlink() {
+            continue;
+        }
+        if let Some(found) = find_git_working_tree(&entry.path(), depth - 1) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Full safety evaluation of one declared path. The checks are identical for a
 /// plan and for an execution so a directory cannot become removable in between.
 fn evaluate(path: &Path) -> std::result::Result<(), String> {
@@ -148,8 +179,17 @@ fn evaluate(path: &Path) -> std::result::Result<(), String> {
         return Err(format!("not a directory: {}", path.display()));
     }
     safety::ensure_not_install_root(path, "build-roots").map_err(|error| error.to_string())?;
+    if let Some(tree) = find_git_working_tree(path, GIT_TREE_DEPTH) {
+        return Err(format!(
+            "declared root holds a git working tree at {} and is removed whole: uncommitted work inside it would be lost",
+            tree.display()
+        ));
+    }
     Ok(())
 }
+
+/// How far below a declared root a checkout is still looked for.
+const GIT_TREE_DEPTH: usize = 2;
 
 pub fn build_root_plan(options: BuildRootOptions) -> Result<BuildRootPlan> {
     let config = build_root_config(options)?;
@@ -312,5 +352,39 @@ mod tests {
         assert!(error.to_string().contains("confirm"), "{error}");
         let error = build_root_clean(BuildRootCleanOptions { confirm: true, ..BuildRootCleanOptions::default() }).unwrap_err();
         assert!(error.to_string().contains("no declared path"), "{error}");
+    }
+
+    fn fixture_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("open-cleaner-anchors-{label}-{}", safety::now_unix_ms()));
+        std::fs::create_dir_all(&root).expect("create fixture root");
+        root
+    }
+
+    /// A declared root is removed whole, so a checkout at its top or one or two
+    /// levels below it must be refused: uncommitted work would vanish with it.
+    #[test]
+    fn a_declared_root_holding_a_checkout_near_its_top_is_refused() {
+        let root = fixture_root("git-top");
+        std::fs::create_dir_all(root.join(".git")).expect("create .git");
+        let reason = evaluate(&root).unwrap_err();
+        assert!(reason.contains("git working tree"), "{reason}");
+        std::fs::remove_dir_all(&root).ok();
+
+        let root = fixture_root("git-nested");
+        std::fs::create_dir_all(root.join("work").join("checkout").join(".git")).expect("create nested .git");
+        let reason = evaluate(&root).unwrap_err();
+        assert!(reason.contains("git working tree"), "{reason}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The scan is bounded on purpose: below that depth the domain would walk
+    /// the very caches it exists to remove, and a stray `.git` deeper down is
+    /// the operator's declared content, not a checkout of the root itself.
+    #[test]
+    fn a_checkout_below_the_scan_depth_does_not_block_the_root() {
+        let root = fixture_root("git-deep");
+        std::fs::create_dir_all(root.join("a").join("b").join("c").join(".git")).expect("create deep .git");
+        assert!(evaluate(&root).is_ok(), "a checkout deeper than the scan must not block the declared root");
+        std::fs::remove_dir_all(&root).ok();
     }
 }
