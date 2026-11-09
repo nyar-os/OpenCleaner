@@ -427,7 +427,10 @@ cli.command('temp', 'cli.cmd.temp')
             console.log(`scanned: ${plan.scannedFiles} files / ${formatBytes(plan.scannedBytes)}`);
             console.log(`candidates: ${plan.candidateFiles} files / ${formatBytes(plan.candidateBytes)}`);
             console.log(
-                `skipped: recent=${plan.skipped.recent} dir-recent=${plan.skipped.dirRecent} dev-root=${plan.skipped.devRoot} build-root=${plan.skipped.buildRoot} in-use=${plan.skipped.inUse} symlink=${plan.skipped.symlink} protected=${plan.skipped.protected} cwd-shielded=${plan.skipped.cwdShielded} process-temp=${plan.skipped.processTemp} program-shielded=${plan.skipped.programShielded} unreadable=${plan.skipped.unreadable}`,
+                `skipped: recent=${plan.skipped.recent}/${formatBytes(plan.skipped.recentBytes)} dir-recent=${plan.skipped.dirRecent}/${formatBytes(plan.skipped.dirRecentBytes)} build-root=${plan.skipped.buildRoot}/${formatBytes(plan.skipped.buildRootBytes)} in-use=${plan.skipped.inUse}/${formatBytes(plan.skipped.inUseBytes)} symlink=${plan.skipped.symlink}/${formatBytes(plan.skipped.symlinkBytes)} protected=${plan.skipped.protected}/${formatBytes(plan.skipped.protectedBytes)} unreadable=${plan.skipped.unreadable}/${formatBytes(plan.skipped.unreadableBytes)}`,
+            );
+            console.log(
+                `skipped (directories, subtrees never entered): dev-root=${plan.skipped.devRoot} cwd-shielded=${plan.skipped.cwdShielded} process-temp=${plan.skipped.processTemp} program-shielded=${plan.skipped.programShielded}`,
             );
             console.log(
                 `cwd probe: supported=${plan.cwdProbe.supported} processes=${plan.cwdProbe.processes} resolved=${plan.cwdProbe.resolved} unresolved=${plan.cwdProbe.failed} process-temp-dirs=${plan.cwdProbe.tempDirs} program-dirs=${plan.cwdProbe.programDirs}`,
@@ -461,7 +464,7 @@ cli.command('temp', 'cli.cmd.temp')
                 confirm: true,
             });
             console.log(`\nevaluated: ${report.candidateFiles}  deleted: ${report.deletedFiles} files  freed: ${formatBytes(report.freedBytes)}`);
-            console.log(`skipped during execution: in-use=${report.skipped.inUse} recent=${report.skipped.recent} dir-recent=${report.skipped.dirRecent} dev-root=${report.skipped.devRoot} build-root=${report.skipped.buildRoot} symlink=${report.skipped.symlink} protected=${report.skipped.protected} program-shielded=${report.skipped.programShielded}`);
+            console.log(`skipped during execution: in-use=${report.skipped.inUse}/${formatBytes(report.skipped.inUseBytes)} recent=${report.skipped.recent}/${formatBytes(report.skipped.recentBytes)} dir-recent=${report.skipped.dirRecent}/${formatBytes(report.skipped.dirRecentBytes)} build-root=${report.skipped.buildRoot}/${formatBytes(report.skipped.buildRootBytes)} symlink=${report.skipped.symlink}/${formatBytes(report.skipped.symlinkBytes)} protected=${report.skipped.protected}/${formatBytes(report.skipped.protectedBytes)} program-shielded=${report.skipped.programShielded}`);
             if (report.failures.length) {
                 console.log(`\nfailures (${report.failures.length}):`);
                 for (const failure of report.failures) console.log(`  ${failure.path}  (${failure.reason})`);

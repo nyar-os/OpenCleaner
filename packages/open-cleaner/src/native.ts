@@ -333,22 +333,34 @@ export type SoftwareReport = {
     scannedAtUnixMs: number;
 };
 
+/**
+ * File-scoped categories carry their byte total so a plan that selects nothing
+ * still shows where the scanned bytes went. Directory-scoped categories
+ * (dev roots, shields) count entries only: their subtrees are never entered.
+ */
 export type TempSkips = {
     recent: number;
+    recentBytes: number;
     symlink: number;
+    symlinkBytes: number;
     protected: number;
+    protectedBytes: number;
     inUse: number;
+    inUseBytes: number;
     cwdShielded: number;
     processTemp: number;
     /** Directories hosting the image of a running process. */
     programShielded: number;
     /** Old files whose path holds a directory with newer content. */
     dirRecent: number;
+    dirRecentBytes: number;
     /** Directories excluded because they hold a project manifest anchor. */
     devRoot: number;
     /** Files inside an operator-declared build root. */
     buildRoot: number;
+    buildRootBytes: number;
     unreadable: number;
+    unreadableBytes: number;
 };
 
 export type TempGroup = {

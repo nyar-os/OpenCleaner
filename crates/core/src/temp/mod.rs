@@ -37,12 +37,22 @@ pub struct TempCleanOptions {
     pub confirm: bool,
 }
 
+/// Counters for files and directories the walk refused to select. File-scoped
+/// categories carry their byte total because an operator reading "0 candidates"
+/// must be able to see where the scanned bytes went. Directory-scoped
+/// categories (dev roots, shields, unreadable directories) are counted only:
+/// their subtrees are deliberately never entered, so no byte total exists for
+/// them and inventing one would mean walking what the rule protects.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TempSkips {
     pub recent: u64,
+    pub recent_bytes: u64,
     pub symlink: u64,
+    pub symlink_bytes: u64,
     pub protected: u64,
+    pub protected_bytes: u64,
     pub in_use: u64,
+    pub in_use_bytes: u64,
     pub cwd_shielded: u64,
     /// Directories under a running process's own `TEMP`/`TMP` value.
     pub process_temp: u64,
@@ -51,11 +61,67 @@ pub struct TempSkips {
     /// Files whose own timestamp is old while a directory on their path, below
     /// the root, holds content written inside the age threshold.
     pub dir_recent: u64,
+    pub dir_recent_bytes: u64,
     /// Directories excluded because they hold a project manifest anchor.
     pub dev_root: u64,
     /// Files inside an operator-declared build root.
     pub build_root: u64,
+    pub build_root_bytes: u64,
     pub unreadable: u64,
+    pub unreadable_bytes: u64,
+}
+
+impl TempSkips {
+    pub(crate) fn add(&mut self, category: SkipCategory, bytes: u64) {
+        match category {
+            SkipCategory::Recent => {
+                self.recent += 1;
+                self.recent_bytes = self.recent_bytes.saturating_add(bytes);
+            }
+            SkipCategory::DirRecent => {
+                self.dir_recent += 1;
+                self.dir_recent_bytes = self.dir_recent_bytes.saturating_add(bytes);
+            }
+            SkipCategory::InUse => {
+                self.in_use += 1;
+                self.in_use_bytes = self.in_use_bytes.saturating_add(bytes);
+            }
+            SkipCategory::Symlink => {
+                self.symlink += 1;
+                self.symlink_bytes = self.symlink_bytes.saturating_add(bytes);
+            }
+            SkipCategory::Protected => {
+                self.protected += 1;
+                self.protected_bytes = self.protected_bytes.saturating_add(bytes);
+            }
+            SkipCategory::BuildRoot => {
+                self.build_root += 1;
+                self.build_root_bytes = self.build_root_bytes.saturating_add(bytes);
+            }
+            SkipCategory::Unreadable => {
+                self.unreadable += 1;
+                self.unreadable_bytes = self.unreadable_bytes.saturating_add(bytes);
+            }
+            SkipCategory::CwdShielded => self.cwd_shielded += 1,
+            SkipCategory::ProcessTemp => self.process_temp += 1,
+            SkipCategory::ProgramShielded => self.program_shielded += 1,
+            SkipCategory::DevRoot => self.dev_root += 1,
+        }
+    }
+}
+
+pub(crate) enum SkipCategory {
+    Recent,
+    DirRecent,
+    InUse,
+    Symlink,
+    Protected,
+    BuildRoot,
+    Unreadable,
+    CwdShielded,
+    ProcessTemp,
+    ProgramShielded,
+    DevRoot,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -280,14 +346,14 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
         let is_root = safety::path_key(&dir) == safety::path_key(root);
         let state = if is_root { DirState::default() } else { inspect_dir(&dir, cutoff_ms, threshold_ms) };
         if state.project_root {
-            output.skipped.dev_root += 1;
+            output.skipped.add(SkipCategory::DevRoot, 0);
             continue;
         }
         let dir_recent = dir_recent || state.newest_entry_recent;
         let read = match std::fs::read_dir(&dir) {
             Ok(read) => read,
             Err(error) => {
-                output.skipped.unreadable += 1;
+                output.skipped.add(SkipCategory::Unreadable, 0);
                 output.warnings.push(format!("cannot read {}: {error}", dir.display()));
                 continue;
             }
@@ -296,7 +362,7 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
-                    output.skipped.unreadable += 1;
+                    output.skipped.add(SkipCategory::Unreadable, 0);
                     output.warnings.push(format!("cannot read an entry in {}: {error}", dir.display()));
                     continue;
                 }
@@ -304,31 +370,31 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
             let meta = match entry.metadata() {
                 Ok(meta) => meta,
                 Err(error) => {
-                    output.skipped.unreadable += 1;
+                    output.skipped.add(SkipCategory::Unreadable, 0);
                     output.warnings.push(format!("cannot stat {}: {error}", entry.path().display()));
                     continue;
                 }
             };
             if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
-                output.skipped.symlink += 1;
+                output.skipped.add(SkipCategory::Symlink, if meta.is_file() { meta.len() } else { 0 });
                 continue;
             }
             let path = entry.path();
             if meta.is_dir() {
                 if safety::has_protected_component(&path) {
-                    output.skipped.protected += 1;
+                    output.skipped.add(SkipCategory::Protected, 0);
                     continue;
                 }
                 if is_cwd_shielded(&path, &output.paths) {
-                    output.skipped.cwd_shielded += 1;
+                    output.skipped.add(SkipCategory::CwdShielded, 0);
                     continue;
                 }
                 if is_in_shielded_dir(&path, &output.temp_dirs) {
-                    output.skipped.process_temp += 1;
+                    output.skipped.add(SkipCategory::ProcessTemp, 0);
                     continue;
                 }
                 if is_in_shielded_dir(&path, &output.program_dirs) {
-                    output.skipped.program_shielded += 1;
+                    output.skipped.add(SkipCategory::ProgramShielded, 0);
                     continue;
                 }
                 stack.push((path, dir_recent));
@@ -338,30 +404,30 @@ fn walk(root: &Path, threshold_days_value: u64, cutoff_ms: u64) -> Result<ScanOu
                 continue;
             }
             if !safety::is_within(root, &path) {
-                output.skipped.protected += 1;
+                output.skipped.add(SkipCategory::Protected, meta.len());
                 continue;
             }
             if rules::is_protected(&path) {
-                output.skipped.protected += 1;
+                output.skipped.add(SkipCategory::Protected, meta.len());
                 continue;
             }
             if build_roots.iter().any(|entry| safety::is_within(entry, &path)) {
-                output.skipped.build_root += 1;
+                output.skipped.add(SkipCategory::BuildRoot, meta.len());
                 continue;
             }
             output.scanned_files += 1;
             output.scanned_bytes = output.scanned_bytes.saturating_add(meta.len());
             let Some(modified_ms) = modified_unix_ms(&meta)
             else {
-                output.skipped.unreadable += 1;
+                output.skipped.add(SkipCategory::Unreadable, meta.len());
                 continue;
             };
             if modified_ms.saturating_add(threshold_ms) > cutoff_ms {
-                output.skipped.recent += 1;
+                output.skipped.add(SkipCategory::Recent, meta.len());
                 continue;
             }
             if dir_recent {
-                output.skipped.dir_recent += 1;
+                output.skipped.add(SkipCategory::DirRecent, meta.len());
                 continue;
             }
             output.candidates.push(Candidate { path, bytes: meta.len(), age_days: age_days(cutoff_ms, threshold_ms, modified_ms) });
@@ -416,7 +482,7 @@ pub fn temp_plan(options: TempOptions) -> Result<TempPlan> {
     let mut skipped = scanned.skipped;
     for candidate in scanned.candidates {
         if safety::probe_file_in_use(&candidate.path) {
-            skipped.in_use += 1;
+            skipped.add(SkipCategory::InUse, candidate.bytes);
             continue;
         }
         accepted.push(candidate);
@@ -499,29 +565,29 @@ pub fn temp_clean(options: TempCleanOptions) -> Result<TempCleanReport> {
             }
         };
         if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
-            skipped.symlink += 1;
+            skipped.add(SkipCategory::Symlink, if meta.is_file() { meta.len() } else { 0 });
             items.push(clean_item(&candidate.path, meta.len(), "skipped", "symbolic link or junction"));
             continue;
         }
         if !meta.is_file() || !safety::is_within(&root, &candidate.path) || rules::is_protected(&candidate.path) {
-            skipped.protected += 1;
+            skipped.add(SkipCategory::Protected, meta.len());
             items.push(clean_item(&candidate.path, meta.len(), "skipped", "protected path"));
             continue;
         }
         let Some(modified_ms) = modified_unix_ms(&meta)
         else {
-            skipped.unreadable += 1;
+            skipped.add(SkipCategory::Unreadable, meta.len());
             items.push(clean_item(&candidate.path, meta.len(), "skipped", "modification time unavailable"));
             continue;
         };
         if modified_ms.saturating_add(threshold_ms) > cutoff_ms {
-            skipped.recent += 1;
+            skipped.add(SkipCategory::Recent, meta.len());
             items.push(clean_item(&candidate.path, meta.len(), "skipped", "modified within the age threshold"));
             continue;
         }
         candidates += 1;
         if safety::probe_file_in_use(&candidate.path) {
-            skipped.in_use += 1;
+            skipped.add(SkipCategory::InUse, meta.len());
             items.push(clean_item(&candidate.path, meta.len(), "skipped", "open by another process"));
             continue;
         }
@@ -588,6 +654,7 @@ mod tests {
         assert_eq!(report.candidate_files, 2);
         assert_eq!(report.candidate_bytes, 6144);
         assert_eq!(report.skipped.recent, 1);
+        assert_eq!(report.skipped.recent_bytes, 1024, "the recent counter names the bytes it holds back");
         assert!(report.extension_groups.iter().any(|group| group.label == "bin" && group.files == 1));
         assert!(report.age_groups.iter().any(|group| group.label == "14-30 days"));
         std::fs::remove_dir_all(&root).ok();
@@ -628,6 +695,7 @@ mod tests {
             temp_plan(TempOptions { root: Some(root.display().to_string()), older_than_days: Some(7), sample_limit: Some(0) }).expect("plan");
         assert_eq!(report.candidate_files, 0);
         assert_eq!(report.skipped.dir_recent, 1);
+        assert_eq!(report.skipped.dir_recent_bytes, 1024, "a held-back stale file reports its bytes");
         std::fs::remove_dir_all(&root).ok();
     }
 
