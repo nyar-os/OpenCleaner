@@ -14,7 +14,9 @@
 //! Flags: `--root <dir>` reuses an existing corpus, `--keep` keeps a generated
 //! corpus, `--concurrency <n>` sets the clean worker count, `--baseline <scan|none>`
 //! selects whether the delete reuses the scan-time size or measures every tree
-//! again, `--phase scan` stops after the dry-run plan.
+//! again, `--phase scan` stops after the dry-run plan, `--global` also collects
+//! the level-2 global package caches of the scanned roots. A `--root` outside
+//! the generated corpus is never deleted unless `--clean` is passed explicitly.
 
 use std::{
     env,
@@ -34,6 +36,7 @@ fn main() {
     let baseline_mode = args.get("--baseline").cloned().unwrap_or_else(|| "scan".to_string());
     let keep = args.contains_key("--keep");
 
+    let include_global = args.contains_key("--global");
     let generated = !args.contains_key("--root");
     let root = match args.get("--root") {
         Some(path) => PathBuf::from(path),
@@ -61,17 +64,20 @@ fn main() {
     let symlink_anchor = root.join("link-project");
     println!("symlink gate corpus: {}", if symlink_anchor.exists() { "present" } else { "absent" });
 
-    let scan = dev_scan(DevScanOptions { roots: vec![root.display().to_string()], include_global: false, max_depth: None, limit: None })
-        .expect("scan");
+    let scan =
+        dev_scan(DevScanOptions { roots: vec![root.display().to_string()], include_global, max_depth: None, limit: None }).expect("scan");
     report_scan(&scan, &root);
 
     let plan = dev_plan(
-        DevScanOptions { roots: vec![root.display().to_string()], include_global: false, max_depth: None, limit: None },
+        DevScanOptions { roots: vec![root.display().to_string()], include_global, max_depth: None, limit: None },
         DeleteMode::Permanent,
     )
     .expect("plan");
     report_plan(&plan);
-    if phase == "scan" {
+    // A real root is never cleaned by the default phase: deleting outside the
+    // generated corpus requires the explicit `--clean` flag on top of `confirm`.
+    let destructive = phase != "scan" && (generated || args.contains_key("--clean"));
+    if phase == "scan" || !destructive {
         if generated && !keep {
             let _ = fs::remove_dir_all(&root);
         }
@@ -101,15 +107,16 @@ fn main() {
 
 fn args() -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    let mut argv = env::args().skip(1);
+    let mut argv = env::args().skip(1).peekable();
     while let Some(arg) = argv.next() {
-        if let Some(value) = argv.next()
-            && !value.starts_with("--")
-        {
-            out.insert(arg, value);
-            continue;
-        }
-        out.insert(arg, String::new());
+        // A flag only takes the next token as its value when that token is not
+        // itself a flag. Consuming a flag as a value silently drops it, which
+        // once turned a `--phase scan` dry run into a full clean.
+        let value = match argv.peek() {
+            Some(next) if !next.starts_with("--") => argv.next().unwrap_or_default(),
+            _ => String::new(),
+        };
+        out.insert(arg, value);
     }
     out
 }
@@ -142,6 +149,13 @@ fn report_plan(plan: &open_cleaner_core::DevPlan) {
     println!("\n== plan ==");
     let removable = plan.items.iter().filter(|item| item.removable).count();
     println!("removable: {removable} of {}  bytes: {}  skipped: {}", plan.items.len(), plan.removable_bytes, plan.skipped_bytes);
+    // The largest delete targets, so an operator can review what a clean run
+    // would remove before anything is deleted.
+    let mut ranked: Vec<&open_cleaner_core::DevPlanItem> = plan.items.iter().filter(|item| item.removable).collect();
+    ranked.sort_by_key(|item| std::cmp::Reverse(item.artifact.bytes));
+    for item in ranked.iter().take(20) {
+        println!("delete: {:>13} B  {}", item.artifact.bytes, item.artifact.path);
+    }
     for item in &plan.items {
         if let Some(reason) = item.skip_reason {
             println!("skip: {}  {}", reason.as_str(), item.artifact.path);
