@@ -29,6 +29,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  oidc-debug:
+    runs-on: ubuntu-latest
+    environment: NPM_PUBLISH
+    steps:
+      - name: Probe OIDC token and registry exchange
+        run: |
+          set -euo pipefail
+          echo "URL present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
+          echo "TOKEN present: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+yes}"
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "ERROR: ACTIONS_ID_TOKEN_REQUEST_URL is empty"
+            exit 1
+          fi
+          JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://registry.npmjs.org/" | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')
+          echo "--- JWT claims ---"
+          echo "$JWT" | cut -d. -f2 | python3 -c "import sys,base64,json;d=sys.stdin.read().strip();print(json.dumps(json.loads(base64.urlsafe_b64decode(d+'='*(-len(d)%4))),indent=1))"
+          echo "--- exchange /-/oidc/token ---"
+          CODE=$(curl -sS -o /tmp/ex.json -w "%{http_code}" -X POST -H "Content-Type: application/json" -d "{\"identity_token\":\"$JWT\"}" https://registry.npmjs.org/-/oidc/token)
+          echo "status: $CODE"
+          python3 -c "import json;d=json.load(open('/tmp/ex.json'));print({k:v for k,v in d.items() if k!='token'})" 2>/dev/null || head -c 300 /tmp/ex.json
+          echo
   build-native:
     strategy:
       fail-fast: true
