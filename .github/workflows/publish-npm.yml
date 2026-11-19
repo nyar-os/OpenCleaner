@@ -36,10 +36,11 @@ jobs:
         include:
           - runner: windows-latest
             target: win32-x64
-          - runner: macos-14
+          - runner: macos-latest
             target: darwin-arm64
-          - runner: macos-13
+          - runner: macos-latest
             target: darwin-x64
+            cross_target: x86_64-apple-darwin
           - runner: ubuntu-latest
             target: linux-x64
           - runner: ubuntu-24.04-arm
@@ -57,11 +58,17 @@ jobs:
         with:
           node-version: "24.12.0"
           package-manager-cache: false
+      - name: Add the cross Rust target
+        if: matrix.cross_target != ''
+        run: rustup target add ${{ matrix.cross_target }}
       - name: Install
         run: pnpm install --frozen-lockfile
       - name: Build native addon
+        env:
+          OPEN_CLEANER_TARGET: ${{ matrix.cross_target }}
         run: pnpm run build:napi
       - name: Smoke load the native addon
+        if: matrix.cross_target == ''
         run: pnpm run smoke:native
       - uses: actions/upload-artifact@v5
         with:

@@ -42,7 +42,7 @@ function hostTriple(): string {
  * Without it the host triple is used.
  */
 export function resolveTarget(): Target {
-    const triple = process.env.OPEN_CLEANER_TARGET ?? hostTriple();
+    const triple = process.env.OPEN_CLEANER_TARGET || hostTriple();
     const target = TARGETS[triple];
     if (!target) {
         throw new Error(`Unsupported Rust target ${triple}. Supported targets: ${Object.keys(TARGETS).join(', ')}`);
