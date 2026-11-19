@@ -74,7 +74,8 @@ fn main() {
         println!("\nnothing removable");
         return;
     }
-    let report = build_dir_clean(BuildDirCleanOptions { cwd: None, targets, mode: DeleteMode::Permanent, confirm: true }).expect("build dir clean");
+    let report =
+        build_dir_clean(BuildDirCleanOptions { cwd: None, targets, mode: DeleteMode::Permanent, confirm: true }).expect("build dir clean");
     println!("\n== clean ==");
     println!("executed: {}  freed {} B", report.executed, report.freed_bytes);
     for item in &report.items {

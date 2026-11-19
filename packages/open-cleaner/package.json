@@ -1,6 +1,6 @@
 {
     "name": "@wae/open-cleaner",
-    "version": "0.0.0",
+    "version": "0.0.1",
     "description": "Native disk scanner with optional WebView2 GUI — dogfood product for WAE",
     "type": "module",
     "main": "./dist/index.js",

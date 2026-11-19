@@ -81,7 +81,10 @@ pub fn scan(options: ScanOptions) -> Result<ScanReport> {
                 entries.push(ScanEntry { path: entry.path().display().to_string(), bytes, kind: classify(entry.path(), &root).to_string() });
             }
             Err(error) => {
-                let Some(path) = error.path() else { continue };
+                let Some(path) = error.path()
+                else {
+                    continue;
+                };
                 // The root itself must be listable, otherwise there is no scan to report.
                 if path == root.as_path() {
                     return Err(Error::Io { path: root.display().to_string(), source: error.into() });
@@ -105,14 +108,7 @@ pub fn scan(options: ScanOptions) -> Result<ScanReport> {
 
     let scanned_at_unix_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
 
-    Ok(ScanReport {
-        root: root.display().to_string(),
-        total_bytes,
-        unreadable_dirs,
-        unreadable_paths,
-        entries,
-        scanned_at_unix_ms,
-    })
+    Ok(ScanReport { root: root.display().to_string(), total_bytes, unreadable_dirs, unreadable_paths, entries, scanned_at_unix_ms })
 }
 
 fn classify(path: &Path, root: &Path) -> &'static str {

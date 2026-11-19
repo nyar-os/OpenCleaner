@@ -1,6 +1,6 @@
 {
     "name": "@wae/open-cleaner-skills",
-    "version": "0.0.0",
+    "version": "0.0.1",
     "description": "Agent skills for the OpenCleaner CLI",
     "license": "Apache-2.0",
     "files": [

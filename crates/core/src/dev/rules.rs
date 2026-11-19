@@ -137,8 +137,14 @@ pub fn dead_worktree(dir: &Path) -> bool {
     if !meta.is_file() {
         return false;
     }
-    let Ok(text) = boost_fs::read_to_string(&dot_git) else { return false };
-    let Some(target) = text.lines().find_map(|line| line.trim().strip_prefix("gitdir:")) else { return false };
+    let Ok(text) = boost_fs::read_to_string(&dot_git)
+    else {
+        return false;
+    };
+    let Some(target) = text.lines().find_map(|line| line.trim().strip_prefix("gitdir:"))
+    else {
+        return false;
+    };
     let target = PathBuf::from(target.trim());
     let target = if target.is_absolute() { target } else { dir.join(target) };
     match boost_fs::exists(&target) {

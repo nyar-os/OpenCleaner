@@ -1,6 +1,6 @@
 {
     "name": "@wae/open-cleaner-linux-arm64",
-    "version": "0.0.0",
+    "version": "0.0.1",
     "description": "Linux arm64 native addon for @wae/open-cleaner",
     "os": ["linux"],
     "cpu": ["arm64"],

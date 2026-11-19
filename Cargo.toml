@@ -10,7 +10,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["WAE Team <team@wae.dev>"]
@@ -24,7 +24,7 @@ thiserror = "2"
 boost-fs = { git = "https://github.com/oovm/rust-boost", rev = "08c38294d7943686675f34b26088a2705e93184f" }
 # Facade from doki-land/wae-framework (pinned rev for CI).
 wae = { git = "https://github.com/doki-land/wae-framework.git", rev = "b5d555cc9f492858c602b62c3bd46a6be69012d4" }
-open-cleaner-core = { path = "crates/core", version = "0.0.0" }
+open-cleaner-core = { path = "crates/core", version = "0.0.1" }
 
 [profile.release]
 lto = true

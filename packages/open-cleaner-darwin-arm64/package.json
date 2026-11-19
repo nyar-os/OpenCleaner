@@ -1,6 +1,6 @@
 {
     "name": "@wae/open-cleaner-darwin-arm64",
-    "version": "0.0.0",
+    "version": "0.0.1",
     "description": "macOS arm64 native addon for @wae/open-cleaner",
     "os": ["darwin"],
     "cpu": ["arm64"],
