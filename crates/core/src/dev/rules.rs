@@ -102,6 +102,7 @@ pub enum Ecosystem {
     Maven,
     Nuget,
     Bundler,
+    Git,
 }
 
 impl Ecosystem {
@@ -118,7 +119,33 @@ impl Ecosystem {
             Self::Maven => "maven",
             Self::Nuget => "nuget",
             Self::Bundler => "bundler",
+            Self::Git => "git",
         }
+    }
+}
+
+/// A linked git worktree whose administrative gitdir no longer exists is
+/// dead: no git command runs in it, and the checkout is rebuilt from the
+/// main repository, so the whole directory is reclaimable. The proof is the
+/// `.git` file's recorded `gitdir:` target, never the directory name.
+pub fn dead_worktree(dir: &Path) -> bool {
+    let dot_git = dir.join(".git");
+    let Ok(meta) = boost_fs::symlink_metadata(&dot_git)
+    else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(text) = boost_fs::read_to_string(&dot_git) else { return false };
+    let Some(target) = text.lines().find_map(|line| line.trim().strip_prefix("gitdir:")) else { return false };
+    let target = PathBuf::from(target.trim());
+    let target = if target.is_absolute() { target } else { dir.join(target) };
+    match boost_fs::exists(&target) {
+        Ok(exists) => !exists,
+        // An unresolvable gitdir path is treated as alive: the dead claim
+        // must be provable, never guessed from an error.
+        Err(_) => false,
     }
 }
 

@@ -732,6 +732,7 @@ impl Collector<'_> {
         let started = self.profile.as_ref().map(|_| Instant::now());
         let mut manifests = BTreeSet::new();
         let mut children: Vec<PathBuf> = Vec::new();
+        let mut git_file = false;
         let mut unreadable = false;
 
         match boost_fs::read_dir(dir) {
@@ -753,10 +754,13 @@ impl Collector<'_> {
                         }
                         children.push(path);
                     }
-                    else if file_type.is_file()
-                        && let Some(kind) = ManifestKind::from_os_name(&item.file_name())
-                    {
-                        manifests.insert(kind);
+                    else if file_type.is_file() {
+                        if os_eq_ignore_ascii(&item.file_name(), ".git") {
+                            git_file = true;
+                        }
+                        if let Some(kind) = ManifestKind::from_os_name(&item.file_name()) {
+                            manifests.insert(kind);
+                        }
                     }
                 }
             }
@@ -769,6 +773,14 @@ impl Collector<'_> {
         if let (Some(profile), Some(start)) = (self.profile.as_mut(), started) {
             profile.walk += start.elapsed();
             profile.dirs += 1;
+        }
+
+        // A linked worktree whose gitdir is gone is one whole-tree artifact:
+        // no git command runs in the directory anymore, so its manifest, if
+        // any, cannot justify keeping the checkout.
+        if git_file && rules::dead_worktree(dir) {
+            self.add_dead_worktree(dir);
+            return;
         }
 
         if !manifests.is_empty() {
@@ -854,6 +866,37 @@ impl Collector<'_> {
             project_root: Some(root.display().to_string()),
             volume,
             cross_volume,
+            default_selected: true,
+            baseline: baseline_of(&stats),
+            warnings,
+        };
+        self.artifacts.insert(key, artifact);
+    }
+
+    /// Register a dead linked worktree as one whole-tree level-1 artifact. The
+    /// claim is the `.git` file's missing `gitdir:`, re-derived before any
+    /// delete, and the worktree never feeds the global-cache anchor gate.
+    fn add_dead_worktree(&mut self, root: &Path) {
+        if rules::is_protected(root) {
+            return;
+        }
+        let key = root.to_string_lossy().to_ascii_lowercase();
+        if self.artifacts.contains_key(&key) {
+            return;
+        }
+        let mut warnings = Vec::new();
+        let stats = self.measure(root, &mut warnings);
+        let artifact = DevArtifact {
+            path: root.display().to_string(),
+            bytes: stats.bytes,
+            level: 1,
+            risk: RiskLevel::ProjectLocal,
+            ecosystem: Ecosystem::Git,
+            rule: ".git → dead worktree".to_string(),
+            anchor: ".git".to_string(),
+            project_root: Some(root.display().to_string()),
+            volume: platform::volume_of(root),
+            cross_volume: false,
             default_selected: true,
             baseline: baseline_of(&stats),
             warnings,
@@ -989,6 +1032,11 @@ pub(crate) fn resolve_artifact(path: &Path, dirs: &BaseDirs) -> std::result::Res
     if !path.is_absolute() {
         return Err(SkipReason::RuleMismatch);
     }
+    // A dead linked worktree justifies itself from its `.git` file, without
+    // any suffix rule.
+    if rules::dead_worktree(path) {
+        return Ok(());
+    }
     let matches = rules::match_rules_suffix(path);
     if !matches.is_empty() {
         // Several ecosystems can declare the same suffix; the path is accepted
@@ -1011,14 +1059,23 @@ fn evaluate(artifact: &DevArtifact, dirs: &BaseDirs) -> Option<SkipReason> {
     }
 
     if artifact.level == 1 {
-        let matches = rules::match_rules_suffix(path);
-        if matches.is_empty() {
-            return Some(SkipReason::RuleMismatch);
+        if artifact.anchor == ".git" {
+            // A worktree whose gitdir came back is a live checkout again and
+            // loses its claim.
+            if !rules::dead_worktree(path) {
+                return Some(SkipReason::RuleMismatch);
+            }
         }
-        // `build/` and `target/` are declared by more than one ecosystem, so
-        // any of the matching anchors keeps the candidate legitimate.
-        if !matches.iter().any(|(rule, root)| rules::detect_manifests(root).contains(&rule.anchor)) {
-            return Some(SkipReason::ManifestMissing);
+        else {
+            let matches = rules::match_rules_suffix(path);
+            if matches.is_empty() {
+                return Some(SkipReason::RuleMismatch);
+            }
+            // `build/` and `target/` are declared by more than one ecosystem,
+            // so any of the matching anchors keeps the candidate legitimate.
+            if !matches.iter().any(|(rule, root)| rules::detect_manifests(root).contains(&rule.anchor)) {
+                return Some(SkipReason::ManifestMissing);
+            }
         }
     }
     else {
@@ -1292,6 +1349,53 @@ mod tests {
 
         assert_eq!(report.scanned_projects, 2);
         assert_eq!(report.anchors, vec!["Cargo.toml".to_string(), "package.json".to_string()]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_dead_worktree_is_one_whole_tree_claim_and_a_live_one_keeps_its_checkout() {
+        let _guard = FIXTURE_LOCK.lock().unwrap();
+        let root = fixture("dead-worktree");
+
+        // A linked worktree whose gitdir is gone: the whole checkout becomes
+        // one artifact, and its inner `target` is not claimed separately.
+        let dead = root.join("rb-a2wt");
+        touch(&dead.join("Cargo.toml"), 16);
+        touch(&dead.join("src").join("main.rs"), 64);
+        touch(&dead.join("target").join("debug").join("app.bin"), 1024);
+        let git_link = format!("gitdir: {}\n", root.join("gone").join("worktrees").join("rb-a2wt").display());
+        fs::write(dead.join(".git"), &git_link).unwrap();
+
+        // A live linked worktree keeps its checkout; only its artifacts remain.
+        let live = root.join("live-wt");
+        let live_gitdir = root.join("repo").join(".git").join("worktrees").join("live-wt");
+        fs::create_dir_all(&live_gitdir).unwrap();
+        touch(&live.join("package.json"), 16);
+        touch(&live.join("node_modules").join("dep").join("index.js"), 512);
+        fs::write(live.join(".git"), format!("gitdir: {}\n", live_gitdir.display())).unwrap();
+
+        let report = dev_scan_with(
+            DevScanOptions { roots: vec![root.display().to_string()], include_global: false, max_depth: None, limit: None },
+            &base(&root),
+        )
+        .unwrap();
+
+        let dead_path = dead.display().to_string();
+        let artifact = report.artifacts.iter().find(|entry| entry.path == dead_path).expect("the dead worktree is one artifact");
+        assert_eq!(artifact.anchor, ".git");
+        assert_eq!(artifact.ecosystem, Ecosystem::Git);
+        assert_eq!(artifact.bytes, 16 + 64 + 1024 + git_link.len() as u64, "the whole tree is measured, the `.git` file included");
+        assert!(
+            report.artifacts.iter().all(|entry| entry.path == dead_path || !entry.path.starts_with(&dead_path)),
+            "the whole-tree claim subsumes the inner artifacts"
+        );
+        assert!(!report.artifacts.iter().any(|entry| entry.path == live.display().to_string()), "a live worktree keeps its checkout");
+        assert!(report.artifacts.iter().any(|entry| entry.path == live.join("node_modules").display().to_string()));
+
+        let dirs = base(&root);
+        assert!(resolve_artifact(&dead, &dirs).is_ok(), "the dead worktree re-derives its claim at clean time");
+        assert!(resolve_artifact(&live, &dirs).is_err(), "a live worktree is not deletable as a whole tree");
 
         let _ = fs::remove_dir_all(&root);
     }
