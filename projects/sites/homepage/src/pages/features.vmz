@@ -1,0 +1,106 @@
+<template>
+    <SiteShell page="features">
+        <h1>Features</h1>
+        <p class="lead">
+            Everything OpenCleaner does for your disk — and nothing it does
+            behind your back.
+        </p>
+
+        <section class="feature">
+            <h2>Disk analysis</h2>
+            <ul>
+                <li>Parallel recursive scanning with live progress.</li>
+                <li>Size heatmaps and top-consumer reports per volume.</li>
+                <li>Duplicate and stale-cache detection across profiles.</li>
+            </ul>
+        </section>
+
+        <section class="feature">
+            <h2>Safe cleanup</h2>
+            <ul>
+                <li>Every removal is routed through the Recycle Bin.</li>
+                <li>Curated rule packs for browsers, package managers, IDEs
+                    and build caches.</li>
+                <li>Dry-run mode shows exactly what would be removed.</li>
+            </ul>
+        </section>
+
+        <section class="feature">
+            <h2>Developer friendly</h2>
+            <ul>
+                <li>CLI with machine-readable output for scripts and CI.</li>
+                <li>Skill packs teach agents to run safe cleanup jobs.</li>
+                <li>Extensible rules written in plain configuration.</li>
+            </ul>
+        </section>
+
+        <section class="feature">
+            <h2>Privacy first</h2>
+            <ul>
+                <li>No accounts, no phone-home, no telemetry.</li>
+                <li>The whole pipeline runs locally on your machine.</li>
+                <li>Auditable Apache-2.0 source for the entire stack.</li>
+            </ul>
+        </section>
+
+        <p class="cta-line">
+            Ready to try it?
+            <Link to="DownloadPage">
+                Get OpenCleaner
+            </Link>
+        </p>
+    </SiteShell>
+</template>
+
+<style>
+h1 {
+    margin: 0 0 8px;
+    font-size: 36px;
+}
+
+.lead {
+    color: var(--oc-muted);
+    margin: 0 0 32px;
+    font-size: 17px;
+}
+
+.feature {
+    border: 1px solid var(--oc-line);
+    border-radius: var(--oc-radius);
+    background: var(--oc-surface);
+    padding: 24px;
+    margin-bottom: 20px;
+}
+
+.feature h2 {
+    margin: 0 0 12px;
+    font-size: 20px;
+}
+
+.feature ul {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--oc-muted);
+}
+
+.feature li {
+    margin-bottom: 6px;
+}
+
+.cta-line {
+    margin-top: 32px;
+    font-size: 16px;
+}
+</style>
+
+<script client>
+export default class FeaturesPage {
+    static meta() {
+        return {
+            title: "Features · OpenCleaner",
+            description:
+                "Disk analysis, safe Recycle-Bin cleanup, developer CLI and privacy-first design — the full OpenCleaner feature list.",
+        };
+    }
+}
+</script>

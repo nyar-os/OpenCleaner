@@ -1,0 +1,20 @@
+{
+    "name": "@wae/open-cleaner-homepage",
+    "version": "0.0.1",
+    "private": true,
+    "type": "module",
+    "description": "OpenCleaner product homepage built with VMZ",
+    "scripts": {
+        "check": "vmz check .",
+        "build": "vmz build . --profile static",
+        "serve": "vmz serve . --profile static"
+    },
+    "dependencies": {
+        "@vmz/core": "0.3.17"
+    },
+    "devDependencies": {
+        "@vmz/vmz": "0.3.17"
+    },
+    "license": "Apache-2.0",
+    "repository": "https://github.com/nyar-os/OpenCleaner"
+}

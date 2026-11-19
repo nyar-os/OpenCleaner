@@ -1,0 +1,8 @@
+{
+  schemaVersion: 1,
+  defaultLocale: 'en-us',
+  locales: [
+    { id: 'en-us', label: 'English', direction: 'ltr' },
+  ],
+  missing: 'warning',
+}

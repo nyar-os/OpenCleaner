@@ -1,0 +1,35 @@
+<template>
+    <div class="site" :data-page="page">
+        <SiteHeader />
+        <main id="main" class="site-main">
+            <slot />
+        </main>
+        <SiteFooter />
+    </div>
+</template>
+
+<style>
+.site {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+.site-main {
+    flex: 1;
+    width: 100%;
+    max-width: var(--oc-maxw);
+    margin: 0 auto;
+    padding: 48px 24px;
+}
+</style>
+
+<script client>
+/**
+ * Page chrome shared by every route: one header, one content slot, one
+ * footer. Pages own everything inside the slot.
+ */
+export default class SiteShell {
+    public page: string = "";
+}
+</script>

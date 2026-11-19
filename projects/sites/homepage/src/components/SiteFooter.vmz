@@ -1,0 +1,105 @@
+<template>
+    <footer class="site-footer">
+        <div class="site-footer__inner">
+            <div class="site-footer__brand">
+                <span class="site-footer__mark">OpenCleaner</span>
+                <p class="site-footer__tag">
+                    Free, open-source disk cleaning for Windows.
+                </p>
+            </div>
+            <nav aria-label="Product" class="footer-group">
+                <b>Product</b>
+                <Link to="FeaturesPage">
+                    Features
+                </Link>
+                <Link to="DownloadPage">
+                    Download
+                </Link>
+                <Link to="AboutPage">
+                    About
+                </Link>
+            </nav>
+            <nav aria-label="Project" class="footer-group">
+                <b>Project</b>
+                <a href="https://github.com/nyar-os/OpenCleaner" rel="noopener">
+                    Source code
+                </a>
+                <a href="https://github.com/nyar-os/OpenCleaner/issues" rel="noopener">
+                    Issues
+                </a>
+                <a href="https://github.com/nyar-os/OpenCleaner/releases" rel="noopener">
+                    Releases
+                </a>
+            </nav>
+            <p class="site-footer__note">
+                Apache-2.0 licensed · Built with Rust and VMZ
+            </p>
+        </div>
+    </footer>
+</template>
+
+<style>
+.site-footer {
+    border-top: 1px solid var(--oc-line);
+    background: var(--oc-surface);
+    margin-top: 64px;
+}
+
+.site-footer__inner {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr;
+    gap: 32px;
+    max-width: var(--oc-maxw);
+    margin: 0 auto;
+    padding: 40px 24px 32px;
+}
+
+.site-footer__mark {
+    font-weight: 600;
+    font-size: 16px;
+}
+
+.site-footer__tag {
+    margin: 8px 0 0;
+    color: var(--oc-muted);
+    font-size: 14px;
+}
+
+.footer-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.footer-group b {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--oc-muted);
+    margin-bottom: 4px;
+}
+
+.footer-group a {
+    color: var(--oc-text);
+    font-size: 14px;
+}
+
+.site-footer__note {
+    grid-column: 1 / -1;
+    margin: 8px 0 0;
+    padding-top: 16px;
+    border-top: 1px solid var(--oc-line);
+    color: var(--oc-muted);
+    font-size: 13px;
+}
+
+@media (max-width: 720px) {
+    .site-footer__inner {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+
+<script client>
+export default class SiteFooter {}
+</script>

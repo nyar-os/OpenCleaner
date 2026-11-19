@@ -1,0 +1,145 @@
+<template>
+    <SiteShell page="download">
+        <h1>Download OpenCleaner</h1>
+        <p class="lead">
+            Pick the build that matches your platform. All binaries come
+            straight from the public repository — no installers bundled with
+            extras, ever.
+        </p>
+
+        <section class="platforms">
+            <article class="platform">
+                <h2>Windows</h2>
+                <p>
+                    Native desktop app with the full GUI, plus the
+                    <code>open-cleaner</code> CLI.
+                </p>
+                <a class="btn btn--primary" href="https://github.com/nyar-os/OpenCleaner/releases" rel="noopener">
+                    Get the latest release
+                </a>
+            </article>
+            <article class="platform">
+                <h2>CLI via npm</h2>
+                <p>
+                    Install the command-line package on any supported
+                    platform.
+                </p>
+                <pre class="cmd">npm install -g @wae/open-cleaner</pre>
+            </article>
+            <article class="platform">
+                <h2>Build from source</h2>
+                <p>
+                    Clone the repository and build the Rust core with
+                    Cargo.
+                </p>
+                <a class="btn btn--ghost" href="https://github.com/nyar-os/OpenCleaner" rel="noopener">
+                    Source code
+                </a>
+            </article>
+        </section>
+
+        <p class="note">
+            OpenCleaner requires Windows 10 or newer for the GUI. The CLI
+            analysis core also runs on macOS and Linux.
+        </p>
+    </SiteShell>
+</template>
+
+<style>
+h1 {
+    margin: 0 0 8px;
+    font-size: 36px;
+}
+
+.lead {
+    color: var(--oc-muted);
+    margin: 0 0 32px;
+    font-size: 17px;
+}
+
+.platforms {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+}
+
+.platform {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    border: 1px solid var(--oc-line);
+    border-radius: var(--oc-radius);
+    background: var(--oc-surface);
+    padding: 24px;
+}
+
+.platform h2 {
+    margin: 0;
+    font-size: 20px;
+}
+
+.platform p {
+    margin: 0;
+    color: var(--oc-muted);
+    font-size: 15px;
+    flex: 1;
+}
+
+.cmd {
+    margin: 0;
+    padding: 12px 14px;
+    border-radius: 8px;
+    background: var(--oc-surface-2);
+    border: 1px solid var(--oc-line);
+    color: var(--oc-accent);
+    font-size: 13px;
+    overflow-x: auto;
+}
+
+.btn {
+    display: inline-block;
+    padding: 10px 22px;
+    border-radius: var(--oc-radius);
+    font-weight: 600;
+    font-size: 14px;
+    text-align: center;
+}
+
+.btn:hover {
+    text-decoration: none;
+}
+
+.btn--primary {
+    background: var(--oc-accent);
+    color: #06231a;
+}
+
+.btn--ghost {
+    border: 1px solid var(--oc-line);
+    color: var(--oc-text);
+}
+
+.note {
+    margin-top: 28px;
+    color: var(--oc-muted);
+    font-size: 14px;
+}
+
+@media (max-width: 860px) {
+    .platforms {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+
+<script client>
+export default class DownloadPage {
+    static meta() {
+        return {
+            title: "Download · OpenCleaner",
+            description:
+                "Download OpenCleaner for Windows, install the CLI from npm, or build the Rust core from source.",
+        };
+    }
+}
+</script>

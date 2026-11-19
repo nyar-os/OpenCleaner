@@ -1,0 +1,117 @@
+<template>
+    <header class="site-header">
+        <div class="site-header__inner">
+            <Link to="IndexPage" class="brand">
+                <span class="brand__mark">OC</span>
+                <span class="brand__name">OpenCleaner</span>
+            </Link>
+            <nav aria-label="Primary" class="nav">
+                <Link to="IndexPage" data-nav="home" :data-active="activeId === 'home' ? 'true' : 'false'">
+                    Home
+                </Link>
+                <Link to="FeaturesPage" data-nav="features" :data-active="activeId === 'features' ? 'true' : 'false'">
+                    Features
+                </Link>
+                <Link to="DownloadPage" data-nav="download" :data-active="activeId === 'download' ? 'true' : 'false'">
+                    Download
+                </Link>
+                <Link to="AboutPage" data-nav="about" :data-active="activeId === 'about' ? 'true' : 'false'">
+                    About
+                </Link>
+            </nav>
+        </div>
+    </header>
+</template>
+
+<style>
+.site-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: rgba(11, 15, 13, 0.88);
+    border-bottom: 1px solid var(--oc-line);
+    backdrop-filter: blur(8px);
+}
+
+.site-header__inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    max-width: var(--oc-maxw);
+    margin: 0 auto;
+    padding: 14px 24px;
+}
+
+.brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--oc-text);
+}
+
+.brand:hover {
+    text-decoration: none;
+}
+
+.brand__mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: var(--oc-accent-dim);
+    color: #ffffff;
+    font-weight: 700;
+    font-size: 13px;
+}
+
+.brand__name {
+    font-weight: 600;
+    font-size: 17px;
+}
+
+.nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+}
+
+.nav a {
+    color: var(--oc-muted);
+    font-size: 15px;
+}
+
+.nav a:hover {
+    color: var(--oc-text);
+    text-decoration: none;
+}
+
+.nav a[data-active="true"] {
+    color: var(--oc-accent);
+}
+</style>
+
+<script client>
+const NAV_BY_PATH = {
+    "/": "home",
+    "/features": "features",
+    "/download": "download",
+    "/about": "about",
+};
+
+export default class SiteHeader {
+    public activeId: string = "";
+
+    onMount() {
+        this.resolveActive();
+    }
+
+    resolveActive() {
+        if (typeof window === "undefined" || !window.location) return;
+        const path = (window.location.pathname || "/").replace(/\/+$/, "") || "/";
+        this.activeId = NAV_BY_PATH[path] ?? "";
+    }
+}
+</script>

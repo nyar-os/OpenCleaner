@@ -1,0 +1,87 @@
+<template>
+    <SiteShell page="about">
+        <h1>About</h1>
+        <p class="lead">
+            OpenCleaner is a free, open-source disk cleaning tool built by
+            the WAE project as its own daily-driver utility.
+        </p>
+
+        <section class="block">
+            <h2>Why it exists</h2>
+            <p>
+                Commercial cleaners charge for what should be basic system
+                hygiene, and many quietly collect usage data. OpenCleaner
+                inverts that: the whole pipeline is local, the rules are
+                auditable, and removal always goes through the Recycle Bin.
+            </p>
+        </section>
+
+        <section class="block">
+            <h2>The stack</h2>
+            <p>
+                The scanning and cleanup core is written in Rust. The
+                desktop GUI is a native WebView surface built with the VMZ
+                compiler, and the command-line interface is assembled on
+                top of the WAE Commander toolkit. Everything ships under
+                the Apache-2.0 license.
+            </p>
+        </section>
+
+        <section class="block">
+            <h2>Get involved</h2>
+            <p>
+                Rule packs, translations and platform fixes are welcome.
+                Open an issue or a pull request on the public repository —
+                or just run
+                <Link to="DownloadPage">
+                    OpenCleaner
+                </Link>
+                and tell us what it missed.
+            </p>
+        </section>
+    </SiteShell>
+</template>
+
+<style>
+h1 {
+    margin: 0 0 8px;
+    font-size: 36px;
+}
+
+.lead {
+    color: var(--oc-muted);
+    margin: 0 0 32px;
+    font-size: 17px;
+}
+
+.block {
+    border: 1px solid var(--oc-line);
+    border-radius: var(--oc-radius);
+    background: var(--oc-surface);
+    padding: 24px;
+    margin-bottom: 20px;
+}
+
+.block h2 {
+    margin: 0 0 10px;
+    font-size: 20px;
+}
+
+.block p {
+    margin: 0;
+    color: var(--oc-muted);
+    font-size: 15px;
+}
+</style>
+
+<script client>
+export default class AboutPage {
+    static meta() {
+        return {
+            title: "About · OpenCleaner",
+            description:
+                "OpenCleaner is a free, open-source disk cleaner for Windows built with a Rust core, VMZ GUI and WAE Commander CLI.",
+        };
+    }
+}
+</script>

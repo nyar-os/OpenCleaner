@@ -1,0 +1,50 @@
+<template>
+    <div class="app-root">
+        <slot />
+    </div>
+</template>
+
+<style>
+:root {
+    --oc-bg: #0b0f0d;
+    --oc-surface: #121815;
+    --oc-surface-2: #18211d;
+    --oc-line: #24312b;
+    --oc-text: #e7efe9;
+    --oc-muted: #9db0a6;
+    --oc-accent: #3ddc84;
+    --oc-accent-dim: #1f7a4a;
+    --oc-radius: 12px;
+    --oc-maxw: 1080px;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background: var(--oc-bg);
+    color: var(--oc-text);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    line-height: 1.6;
+}
+
+a {
+    color: var(--oc-accent);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+</style>
+
+<script client>
+export default class Application {}
+</script>

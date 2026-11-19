@@ -9,6 +9,7 @@
         "build:napi": "wae native build",
         "build:ts": "pnpm --filter @wae/open-cleaner run build",
         "build:ui": "pnpm --filter @wae/open-cleaner-ui run build && pnpm --filter @wae/open-cleaner-ui run stage",
+        "build:homepage": "pnpm --filter @wae/open-cleaner-homepage run build",
         "build": "pnpm run build:napi && pnpm run build:ts && pnpm run build:ui",
         "stage:native": "wae native stage",
         "smoke:native": "node --experimental-strip-types scripts/smoke-native.ts",
