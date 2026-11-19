@@ -14,6 +14,9 @@ importers:
       '@types/node':
         specifier: ^22.20.4
         version: 22.20.5
+      '@wae/wae':
+        specifier: 0.0.6
+        version: 0.0.6
       typescript:
         specifier: ^5.9.2
         version: 5.9.3
@@ -194,6 +197,29 @@ packages:
   '@wae/commander@0.0.6':
     resolution: {integrity: sha512-jRTwhX6iHPPQuchs4+BIfbrEjulGNV8w837jhwr+uxPTXOe+iWXw77OXz285jyEaLKZEGEq8FArJBW/YJWzFGA==}
     engines: {node: '>=20'}
+
+  '@wae/wae-darwin-arm64@0.0.6':
+    resolution: {integrity: sha512-99x22K0QG5walZantcQ5ax8Z0fekmmJl58RgIeNbftSYixuQicVlGIU/ghDbx26tc7vXHTtbLeMM3yVtzxmFeQ==}
+    engines: {node: '>=20'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@wae/wae-linux-x64@0.0.6':
+    resolution: {integrity: sha512-0yyKBVWmeZ+p5+UTouHts9YAvxHyzqYXrNMjHpya8vP2bv4IcYgZ2H3FzkeaTXL6yKXDAUmIBtjuL6VialAytQ==}
+    engines: {node: '>=20'}
+    cpu: [x64]
+    os: [linux]
+
+  '@wae/wae-win32-x64@0.0.6':
+    resolution: {integrity: sha512-h/xZid5HEIH6CcNzHMcT9VsiZgU0W6lGKahj7rLpNFfNs9uHkkGkKMVPVtwrdpuctbAXz5bEcX2Ci7HAUtBX9A==}
+    engines: {node: '>=20'}
+    cpu: [x64]
+    os: [win32]
+
+  '@wae/wae@0.0.6':
+    resolution: {integrity: sha512-M55OfagQy8UKV9ETS/UwuZyl3tTj/xWdRjzbGwT3KWo9U4eCNOD9DEqW3LyiKlYjAC9+plq/tSgqYDBi4V0rBw==}
+    engines: {node: '>=20'}
+    hasBin: true
 
   boolbase@2.0.0:
     resolution: {integrity: sha512-DkVaaQHymRhpYEYo9x1oo7Q7B0Y6KJUsjm3c9eTyFDby4MHLBTwZ6ZDWBel5zrYxj1WsZgC5oLpiz+93MluXeA==}
@@ -383,6 +409,23 @@ snapshots:
       - canvas
 
   '@wae/commander@0.0.6': {}
+
+  '@wae/wae-darwin-arm64@0.0.6':
+    optional: true
+
+  '@wae/wae-linux-x64@0.0.6':
+    optional: true
+
+  '@wae/wae-win32-x64@0.0.6':
+    optional: true
+
+  '@wae/wae@0.0.6':
+    dependencies:
+      '@wae/commander': 0.0.6
+    optionalDependencies:
+      '@wae/wae-darwin-arm64': 0.0.6
+      '@wae/wae-linux-x64': 0.0.6
+      '@wae/wae-win32-x64': 0.0.6
 
   boolbase@2.0.0: {}
 
