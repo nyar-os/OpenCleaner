@@ -65,7 +65,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build native addon
         env:
-          OPEN_CLEANER_TARGET: ${{ matrix.cross_target }}
+          OPEN_CLEANER_TARGET: ${{ matrix.target }}
         run: pnpm run build:napi
       - name: Smoke load the native addon
         if: matrix.cross_target == ''
