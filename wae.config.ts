@@ -3,6 +3,7 @@ export default {
         crate: 'open-cleaner-napi',
         cdylib: 'open_cleaner_napi',
         targetEnv: 'OPEN_CLEANER_TARGET',
+        crossCompile: 'allow',
         targets: [
             {
                 platform: 'win32',
