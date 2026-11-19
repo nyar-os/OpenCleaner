@@ -44,7 +44,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -426,7 +425,7 @@ fn collect_declarations(
         declarations.push(environment_declaration(&value, cwd));
     }
     for file in config_files(cwd, dirs, warnings) {
-        let text = match fs::read_to_string(&file.path) {
+        let text = match boost_fs::read_to_string(&file.path) {
             Ok(text) => text,
             Err(error) => {
                 warnings.push(format!("cannot read {}: {error}", file.path.display()));
@@ -621,7 +620,7 @@ fn temp_coverage_warning(roots: &[PathBuf], base_depth: usize) -> Option<String>
     ))
 }
 
-fn child_dir(entry: &fs::DirEntry) -> Option<PathBuf> {
+fn child_dir(entry: &boost_fs::FolderEntry) -> Option<PathBuf> {
     let meta = entry.metadata().ok()?;
     if !meta.is_dir() || platform::is_link_like(&meta) || meta.file_type().is_symlink() {
         return None;
@@ -630,7 +629,7 @@ fn child_dir(entry: &fs::DirEntry) -> Option<PathBuf> {
 }
 
 fn immediate_dirs(dir: &Path) -> Vec<PathBuf> {
-    let Ok(read) = fs::read_dir(dir)
+    let Ok(read) = boost_fs::read_dir(dir)
     else {
         return Vec::new();
     };
@@ -638,7 +637,7 @@ fn immediate_dirs(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn is_plain_dir(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && !platform::is_link_like(&meta) && !meta.file_type().is_symlink())
+    boost_fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && !platform::is_link_like(&meta) && !meta.file_type().is_symlink())
 }
 
 /// The rule names the profile directory itself: `debug/.fingerprint` or
@@ -651,7 +650,7 @@ fn profile_fingerprint(dir: &Path) -> Option<PathBuf> {
 /// pattern is matched on the file name, so a renamed or prefixed copy still
 /// counts while a directory of that name never does.
 fn rustc_info_file(dir: &Path) -> Option<PathBuf> {
-    let read = fs::read_dir(dir).ok()?;
+    let read = boost_fs::read_dir(dir).ok()?;
     for entry in read.flatten() {
         if !entry.file_name().to_string_lossy().ends_with("rustc_info.json") {
             continue;
@@ -765,7 +764,7 @@ fn scan_root(
     output: &mut ProbeOutput,
     warnings: &mut Vec<String>,
 ) {
-    let meta = match fs::symlink_metadata(root) {
+    let meta = match boost_fs::symlink_metadata(root) {
         Ok(meta) => meta,
         Err(error) => {
             warnings.push(format!("cannot inspect probe root {}: {error}", root.display()));
@@ -780,7 +779,7 @@ fn scan_root(
         warnings.push(format!("probe root does not exist or is not a directory: {}", root.display()));
         return;
     }
-    let read = match fs::read_dir(root) {
+    let read = match boost_fs::read_dir(root) {
         Ok(read) => read,
         Err(error) => {
             warnings.push(format!("cannot list probe root {}: {error}", root.display()));
@@ -889,7 +888,7 @@ fn build_root_declarations(config: Option<&Path>, warnings: &mut Vec<String>) ->
         warnings.push("no build-root config path, so the separate source cannot be compared".to_string());
         return (Vec::new(), None);
     };
-    match fs::read_to_string(&path) {
+    match boost_fs::read_to_string(&path) {
         Ok(text) => {
             let parsed = crate::anchors::parse_build_root_config(&text, &path.display().to_string());
             (parsed.declarations, Some(parsed.config_path))
@@ -1299,7 +1298,7 @@ fn anchor_evidence(path: &Path) -> Vec<String> {
         if !crate::dev::rules::detect_manifests(&root).contains(&rule.anchor) {
             continue;
         }
-        let Ok(read) = fs::read_dir(&root)
+        let Ok(read) = boost_fs::read_dir(&root)
         else {
             continue;
         };
@@ -1673,6 +1672,8 @@ fn resolve_cwd(value: Option<&str>, capability: &'static str) -> Result<PathBuf>
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     fn empty_dirs() -> BaseDirs {

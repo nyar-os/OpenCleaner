@@ -243,7 +243,7 @@ pub(crate) fn volume_of(path: &Path) -> Option<String> {
 
 #[cfg(not(windows))]
 fn fs_metadata(path: &Path) -> Option<Metadata> {
-    std::fs::symlink_metadata(path).ok()
+    boost_fs::symlink_metadata(path).ok()
 }
 
 /// Windows junctions and reparse points can form cycles in temp trees, so the

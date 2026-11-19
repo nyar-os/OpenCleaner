@@ -5,7 +5,6 @@
 
 use std::{
     ffi::OsStr,
-    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -275,7 +274,7 @@ pub fn is_installed_program_path(path: &Path) -> bool {
 /// Detect manifests in one directory. Order is stable so report output is
 /// deterministic.
 pub fn detect_manifests(dir: &Path) -> Vec<ManifestKind> {
-    let Ok(read) = fs::read_dir(dir)
+    let Ok(read) = boost_fs::read_dir(dir)
     else {
         return Vec::new();
     };
@@ -359,7 +358,7 @@ pub fn resolve_project_artifact(candidate: &Path) -> Option<(&'static ProjectRul
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::{fs, io::Write};
 
     use super::*;
 

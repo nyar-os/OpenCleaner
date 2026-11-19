@@ -119,7 +119,7 @@ pub fn parse_build_root_config(text: &str, config_path: &str) -> BuildRootConfig
 /// Read the config without touching any directory.
 pub fn build_root_config(options: BuildRootOptions) -> Result<BuildRootConfig> {
     let path = resolve_config(options.config.as_deref())?;
-    let text = match std::fs::read_to_string(&path) {
+    let text = match boost_fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(BuildRootConfig {
@@ -152,7 +152,7 @@ fn find_git_working_tree(root: &Path, depth: usize) -> Option<PathBuf> {
     if depth == 0 {
         return None;
     }
-    let read = std::fs::read_dir(root).ok()?;
+    let read = boost_fs::read_dir(root).ok()?;
     for entry in read.flatten() {
         let Ok(meta) = entry.metadata()
         else {
@@ -256,7 +256,7 @@ pub fn build_root_clean(options: BuildRootCleanOptions) -> Result<BuildRootClean
         return Err(Error::Message("build-roots: no declared path selected for removal".to_string()));
     }
     let config_path = resolve_config(options.config.as_deref())?;
-    let text = std::fs::read_to_string(&config_path).map_err(|error| Error::Io { path: config_path.display().to_string(), source: error })?;
+    let text = boost_fs::read_to_string(&config_path).map_err(|error| Error::Io { path: config_path.display().to_string(), source: error })?;
     let config = parse_build_root_config(&text, &config_path.display().to_string());
     let mut report = BuildRootCleanReport {
         config_path: config.config_path.clone(),
@@ -307,7 +307,7 @@ pub fn build_root_clean(options: BuildRootCleanOptions) -> Result<BuildRootClean
             report.items.push(item);
             continue;
         }
-        match std::fs::remove_dir_all(&path) {
+        match boost_fs::remove_folder_all(&path) {
             Ok(()) => {
                 item.status = "deleted".to_string();
                 report.deleted_dirs += 1;

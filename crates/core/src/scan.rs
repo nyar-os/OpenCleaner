@@ -2,14 +2,14 @@
 //! classification. No platform API is called directly here.
 
 use std::{
-    fs, io,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
+use boost_fs::walk::{ErrorPolicy, Walker};
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result, platform};
+use crate::{Error, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanOptions {
@@ -45,11 +45,11 @@ pub fn default_scan_root() -> PathBuf {
     std::env::temp_dir()
 }
 
-pub fn scan(options: ScanOptions) -> Result<ScanReport> {
-    scan_with(options, &|path| fs::read_dir(path))
-}
+/// Depth cap of the scan. Entries deeper than this below the root are not
+/// listed, which keeps temp trees with pathological nesting finite.
+const MAX_DEPTH: usize = 9;
 
-fn scan_with(options: ScanOptions, read_dir: &dyn Fn(&Path) -> io::Result<fs::ReadDir>) -> Result<ScanReport> {
+pub fn scan(options: ScanOptions) -> Result<ScanReport> {
     let root = options.root.map(PathBuf::from).unwrap_or_else(default_scan_root);
     let limit = options.limit.unwrap_or(50).max(1);
 
@@ -57,14 +57,44 @@ fn scan_with(options: ScanOptions, read_dir: &dyn Fn(&Path) -> io::Result<fs::Re
         return Err(Error::Message(format!("scan root does not exist: {}", root.display())));
     }
 
-    // The root itself must be listable, otherwise there is no scan to report.
-    let read = read_dir(&root).map_err(|source| Error::Io { path: root.display().to_string(), source })?;
+    // The `boost-fs` walk kernel owns the traversal: the depth bound, the pruning of
+    // reparse points that often loop on Windows temp trees, and the listing itself.
+    // Entry sizes come from the listing attributes, so the scan never stats twice.
+    let mut entries: Vec<ScanEntry> = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut unreadable: Vec<PathBuf> = Vec::new();
 
-    let mut walk = Walk { root: &root, entries: Vec::new(), total_bytes: 0, unreadable: Vec::new(), read_dir };
-    walk.collect(read, 0);
-    let mut entries = walk.entries;
-    let unreadable_dirs = walk.unreadable.len();
-    let mut unreadable_paths: Vec<String> = walk.unreadable.iter().map(|path| path.display().to_string()).collect();
+    for item in Walker::new(&root).max_depth(MAX_DEPTH).error_policy(ErrorPolicy::Lenient) {
+        match item {
+            Ok(entry) => {
+                if !entry.is_file() {
+                    continue;
+                }
+                // An entry whose attributes cannot be read cannot be measured, so it is
+                // skipped like an unreadable subtree.
+                let Ok(meta) = entry.metadata()
+                else {
+                    continue;
+                };
+                let bytes = meta.len();
+                total_bytes = total_bytes.saturating_add(bytes);
+                entries.push(ScanEntry { path: entry.path().display().to_string(), bytes, kind: classify(entry.path(), &root).to_string() });
+            }
+            Err(error) => {
+                let Some(path) = error.path() else { continue };
+                // The root itself must be listable, otherwise there is no scan to report.
+                if path == root.as_path() {
+                    return Err(Error::Io { path: root.display().to_string(), source: error.into() });
+                }
+                // A denied directory skips only its own subtree. The rest of
+                // the scan continues and the report says what was skipped.
+                unreadable.push(path.to_path_buf());
+            }
+        }
+    }
+
+    let unreadable_dirs = unreadable.len();
+    let mut unreadable_paths: Vec<String> = unreadable.iter().map(|path| path.display().to_string()).collect();
 
     // Highest level first, so the report starts at the subtree boundary.
     unreadable_paths.sort_by_key(|path| (Path::new(path).components().count(), path.clone()));
@@ -77,60 +107,12 @@ fn scan_with(options: ScanOptions, read_dir: &dyn Fn(&Path) -> io::Result<fs::Re
 
     Ok(ScanReport {
         root: root.display().to_string(),
-        total_bytes: walk.total_bytes,
+        total_bytes,
         unreadable_dirs,
         unreadable_paths,
         entries,
         scanned_at_unix_ms,
     })
-}
-
-struct Walk<'a> {
-    root: &'a Path,
-    entries: Vec<ScanEntry>,
-    total_bytes: u64,
-    unreadable: Vec<PathBuf>,
-    read_dir: &'a dyn Fn(&Path) -> io::Result<fs::ReadDir>,
-}
-
-impl Walk<'_> {
-    fn collect(&mut self, read: fs::ReadDir, depth: usize) {
-        if depth > 8 {
-            return;
-        }
-
-        for item in read {
-            // An entry that cannot be read cannot be classified, so it is
-            // skipped like an unreadable subtree.
-            let Ok(entry) = item
-            else {
-                continue;
-            };
-            let path = entry.path();
-            let Ok(meta) = entry.metadata()
-            else {
-                continue;
-            };
-
-            if meta.is_file() {
-                let bytes = meta.len();
-                self.total_bytes = self.total_bytes.saturating_add(bytes);
-                self.entries.push(ScanEntry { path: path.display().to_string(), bytes, kind: classify(&path, self.root).to_string() });
-            }
-            else if meta.is_dir() {
-                // Skip reparse points / junctions that often loop on Windows temp trees.
-                if platform::is_link_like(&meta) {
-                    continue;
-                }
-                match (self.read_dir)(&path) {
-                    Ok(read) => self.collect(read, depth + 1),
-                    // A denied directory skips only its own subtree. The rest of
-                    // the scan continues and the report says what was skipped.
-                    Err(_) => self.unreadable.push(path),
-                }
-            }
-        }
-    }
 }
 
 fn classify(path: &Path, root: &Path) -> &'static str {
@@ -153,7 +135,7 @@ fn classify(path: &Path, root: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{fs, io::Write};
 
     #[test]
     fn scans_fixture_directory() {
@@ -180,6 +162,56 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A directory held so that listing it fails while its attributes stay readable.
+    ///
+    /// On Windows an exclusive handle makes `ReadDirectory` fail with a sharing
+    /// violation. On Unix the mode is cleared and restored on drop, which fails
+    /// only where the test does not run with privileges that bypass it.
+    struct LockedDir {
+        /// Only read when restoring the mode on Unix; the Windows handle drops itself.
+        #[cfg_attr(windows, allow(dead_code))]
+        path: PathBuf,
+        #[cfg(windows)]
+        _handle: fs::File,
+        #[cfg(not(windows))]
+        restore: fs::Permissions,
+    }
+
+    impl LockedDir {
+        fn new(path: &Path) -> Self {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+                // A directory listing needs backup semantics, and an exclusive
+                // listing handle makes every later `ReadDirectory` fail.
+                let _handle = fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                    .open(path)
+                    .expect("lock directory");
+                Self { path: path.to_path_buf(), _handle }
+            }
+            #[cfg(not(windows))]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let restore = fs::metadata(path).expect("read permissions").permissions();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("clear permissions");
+                Self { path: path.to_path_buf(), restore }
+            }
+        }
+    }
+
+    impl Drop for LockedDir {
+        fn drop(&mut self) {
+            #[cfg(not(windows))]
+            {
+                let _ = fs::set_permissions(&self.path, self.restore.clone());
+            }
+        }
+    }
+
     #[test]
     fn unreadable_subtrees_are_skipped_and_reported() {
         let dir = crate::fixtures::fixture_dir("scan-unreadable");
@@ -196,10 +228,10 @@ mod tests {
             file.sync_all().unwrap();
         }
 
-        let report = scan_with(ScanOptions { root: Some(dir.display().to_string()), limit: Some(10) }, &|path| {
-            if path.ends_with("locked") { Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")) } else { fs::read_dir(path) }
-        })
-        .unwrap();
+        let _locked = LockedDir::new(&dir.join("locked"));
+        let _locked_nested = LockedDir::new(&dir.join("free").join("locked"));
+
+        let report = scan(ScanOptions { root: Some(dir.display().to_string()), limit: Some(10) }).unwrap();
 
         // A denied directory skips only its own subtree: the readable sibling
         // is still measured and the denied bytes are not counted.
@@ -212,6 +244,8 @@ mod tests {
         assert!(report.entries.iter().any(|entry| entry.path.ends_with("a.bin")));
         assert!(!report.entries.iter().any(|entry| entry.path.ends_with("b.bin") || entry.path.ends_with("c.bin")));
 
+        drop(_locked);
+        drop(_locked_nested);
         let _ = fs::remove_dir_all(&dir);
     }
 }

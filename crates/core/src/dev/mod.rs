@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use boost_fs::walk::{ErrorPolicy, Walker};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -733,7 +734,7 @@ impl Collector<'_> {
         let mut children: Vec<PathBuf> = Vec::new();
         let mut unreadable = false;
 
-        match fs::read_dir(dir) {
+        match boost_fs::read_dir(dir) {
             Ok(read) => {
                 for item in read.flatten() {
                     let Ok(file_type) = item.file_type()
@@ -818,7 +819,7 @@ impl Collector<'_> {
             child.clone()
         };
 
-        let Ok(meta) = fs::symlink_metadata(&path)
+        let Ok(meta) = boost_fs::symlink_metadata(&path)
         else {
             return;
         };
@@ -881,7 +882,7 @@ impl Collector<'_> {
             if !self.anchors.contains(&spec.anchor) {
                 continue;
             }
-            let Ok(meta) = fs::symlink_metadata(&spec.path)
+            let Ok(meta) = boost_fs::symlink_metadata(&spec.path)
             else {
                 continue;
             };
@@ -968,7 +969,7 @@ pub(crate) fn gate_path(path: &Path, dirs: &BaseDirs) -> Option<SkipReason> {
     if rules::is_protected(path) || is_base_dir(path, dirs) || rules::is_installed_program_path(path) {
         return Some(SkipReason::ProtectedPath);
     }
-    let Ok(meta) = fs::symlink_metadata(path)
+    let Ok(meta) = boost_fs::symlink_metadata(path)
     else {
         return Some(SkipReason::NotFound);
     };
@@ -1069,53 +1070,56 @@ fn probe_in_use(path: &Path) -> bool {
     if probe.exists() {
         return true;
     }
-    if fs::rename(path, &probe).is_err() {
+    if boost_fs::rename(path, &probe).is_err() {
         return true;
     }
-    fs::rename(&probe, path).is_err()
+    boost_fs::rename(&probe, path).is_err()
 }
 
+/// Size one artifact subtree with the `boost-fs` walk kernel. Entry attributes
+/// come from the listing that produced the entry, so the dive costs one
+/// listing per directory and no separate stat, and reparse points are pruned
+/// by the walk itself instead of being descended into and measured.
 fn dir_size(path: &Path, warnings: &mut Vec<String>) -> SizeStats {
     let mut stats = SizeStats::default();
-    let mut stack = vec![path.to_path_buf()];
-    let mut first = true;
-    while let Some(dir) = stack.pop() {
-        let is_root = std::mem::take(&mut first);
-        stats.dirs += 1;
-        let Ok(read) = fs::read_dir(&dir)
-        else {
-            if warnings.len() < 8 {
-                warnings.push(format!("cannot read {}; size may be incomplete", dir.display()));
+    let mut stamp: Vec<StampEntry> = Vec::new();
+    let mut root_listed = true;
+
+    for item in Walker::new(path).error_policy(ErrorPolicy::Lenient) {
+        match item {
+            Ok(entry) => {
+                if entry.is_folder() {
+                    stats.dirs += 1;
+                }
+                let Ok(meta) = entry.metadata()
+                else {
+                    continue;
+                };
+                if entry.depth() == 1 {
+                    stamp.push(stamp_entry(entry.file_name(), &meta));
+                }
+                if platform::is_link_like(&meta) {
+                    continue;
+                }
+                if entry.is_file() {
+                    stats.files += 1;
+                    stats.bytes = stats.bytes.saturating_add(meta.len());
+                }
             }
-            continue;
-        };
-        let mut stamp = Vec::new();
-        for item in read.flatten() {
-            // `DirEntry::metadata` does not follow symlinks and reuses the
-            // attributes already carried by the directory listing, so measured
-            // files cost no extra path allocation or stat on Windows.
-            let Ok(meta) = item.metadata()
-            else {
-                continue;
-            };
-            if is_root {
-                stamp.push(stamp_entry(&item, &meta));
+            Err(error) => {
+                if error.depth() == 0 {
+                    root_listed = false;
+                }
+                if warnings.len() < 8
+                    && let Some(dir) = error.path()
+                {
+                    warnings.push(format!("cannot read {}; size may be incomplete", dir.display()));
+                }
             }
-            if platform::is_link_like(&meta) {
-                continue;
-            }
-            if meta.is_dir() {
-                stack.push(item.path());
-            }
-            else if meta.is_file() {
-                stats.files += 1;
-                stats.bytes = stats.bytes.saturating_add(meta.len());
-            }
-        }
-        if is_root {
-            stats.stamp = Some(stamp_of(stamp));
         }
     }
+
+    stats.stamp = root_listed.then(|| stamp_of(stamp));
     stats
 }
 
@@ -1128,7 +1132,7 @@ struct StampEntry {
     modified: u64,
 }
 
-fn stamp_entry(item: &fs::DirEntry, meta: &fs::Metadata) -> StampEntry {
+fn stamp_entry(name: &std::ffi::OsStr, meta: &fs::Metadata) -> StampEntry {
     let kind = if platform::is_link_like(meta) {
         2
     }
@@ -1147,7 +1151,7 @@ fn stamp_entry(item: &fs::DirEntry, meta: &fs::Metadata) -> StampEntry {
     else {
         0
     };
-    StampEntry { name: item.file_name().as_encoded_bytes().to_vec(), kind, len: meta.len(), modified }
+    StampEntry { name: name.as_encoded_bytes().to_vec(), kind, len: meta.len(), modified }
 }
 
 /// Order-independent digest: entries are sorted by name first, so the same
@@ -1176,14 +1180,14 @@ fn fnv1a_step(mut hash: u64, bytes: &[u8]) -> u64 {
 /// caller compares it with a scan-time stamp to decide between reusing and
 /// re-measuring.
 fn dir_stamp(dir: &Path) -> Option<DirStamp> {
-    let read = fs::read_dir(dir).ok()?;
+    let read = boost_fs::read_dir(dir).ok()?;
     let mut entries = Vec::new();
     for item in read.flatten() {
         let Ok(meta) = item.metadata()
         else {
             continue;
         };
-        entries.push(stamp_entry(&item, &meta));
+        entries.push(stamp_entry(&item.file_name(), &meta));
     }
     Some(stamp_of(entries))
 }

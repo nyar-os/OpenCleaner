@@ -18,6 +18,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "boost-fs"
+version = "0.1.0"
+source = "git+https://github.com/oovm/rust-boost?rev=08c38294d7943686675f34b26088a2705e93184f#08c38294d7943686675f34b26088a2705e93184f"
+dependencies = [
+ "boost-random",
+]
+
+[[package]]
+name = "boost-math"
+version = "0.1.0"
+source = "git+https://github.com/oovm/rust-boost?rev=08c38294d7943686675f34b26088a2705e93184f#08c38294d7943686675f34b26088a2705e93184f"
+
+[[package]]
+name = "boost-random"
+version = "0.1.0"
+source = "git+https://github.com/oovm/rust-boost?rev=08c38294d7943686675f34b26088a2705e93184f#08c38294d7943686675f34b26088a2705e93184f"
+dependencies = [
+ "boost-math",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -254,6 +275,7 @@ dependencies = [
 name = "open-cleaner-core"
 version = "0.0.0"
 dependencies = [
+ "boost-fs",
  "serde",
  "serde_json",
  "thiserror",

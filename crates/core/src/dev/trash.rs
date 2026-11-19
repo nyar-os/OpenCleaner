@@ -30,7 +30,7 @@ pub fn trash_path(path: &Path) -> Result<()> {
 
 /// Permanent recursive removal. Never follows symlinks.
 pub fn remove_permanently(path: &Path) -> Result<()> {
-    std::fs::remove_dir_all(path).map_err(|source| Error::Io { path: path.display().to_string(), source })
+    boost_fs::remove_folder_all(path).map_err(|source| Error::Io { path: path.display().to_string(), source })
 }
 
 #[cfg(test)]

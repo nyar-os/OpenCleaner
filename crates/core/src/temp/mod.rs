@@ -254,7 +254,7 @@ fn is_in_shielded_dir(dir: &Path, shielded: &[PathBuf]) -> bool {
 /// it. Such a tree is never temp garbage: its files are the project's, and its
 /// `node_modules` or `build` belong to the dev domain, not to file reclamation.
 fn holds_manifest(dir: &Path) -> bool {
-    let Ok(read) = std::fs::read_dir(dir)
+    let Ok(read) = boost_fs::read_dir(dir)
     else {
         return false;
     };
@@ -353,7 +353,7 @@ fn walk_with(root: &Path, threshold_days_value: u64, cutoff_ms: u64, paths: Proc
             continue;
         }
         let dir_recent = dir_recent || state.newest_entry_recent;
-        let read = match std::fs::read_dir(&dir) {
+        let read = match boost_fs::read_dir(&dir) {
             Ok(read) => read,
             Err(error) => {
                 output.skipped.add(SkipCategory::Unreadable, 0);
@@ -566,7 +566,7 @@ fn clean_with(options: TempCleanOptions, paths: ProcessPaths) -> Result<TempClea
     let mut candidates = 0u64;
 
     for candidate in scanned.candidates {
-        let meta = match std::fs::symlink_metadata(&candidate.path) {
+        let meta = match boost_fs::symlink_metadata(&candidate.path) {
             Ok(meta) => meta,
             Err(error) => {
                 let reason = error.to_string();
@@ -602,7 +602,7 @@ fn clean_with(options: TempCleanOptions, paths: ProcessPaths) -> Result<TempClea
             items.push(clean_item(&candidate.path, meta.len(), "skipped", "open by another process"));
             continue;
         }
-        match std::fs::remove_file(&candidate.path) {
+        match boost_fs::remove_file(&candidate.path) {
             Ok(()) => {
                 deleted_files += 1;
                 let bytes = meta.len();

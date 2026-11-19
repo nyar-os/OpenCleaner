@@ -2,7 +2,6 @@
 //! the file system, so it is always a preview.
 
 use std::{
-    fs,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -63,7 +62,7 @@ fn file_exists(path: &str) -> bool {
 }
 
 fn list_dir(path: &str) -> Vec<String> {
-    let read = fs::read_dir(path);
+    let read = boost_fs::read_dir(path);
     read.map(|entries| {
         entries
             .flatten()
@@ -90,30 +89,8 @@ fn newest_entry_unix_ms(path: &str) -> Option<u64> {
     crate::safety::newest_entry_unix_ms(Path::new(path))
 }
 
-/// Directory size without following links or reparse points.
+/// Directory size without following links or reparse points. The measurement
+/// is the shared usage kernel, not a second dive of its own.
 fn size_of(path: &Path) -> u64 {
-    let mut total = 0u64;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(read) = fs::read_dir(&dir)
-        else {
-            continue;
-        };
-        for entry in read.flatten() {
-            let Ok(meta) = fs::symlink_metadata(entry.path())
-            else {
-                continue;
-            };
-            if platform::is_link_like(&meta) {
-                continue;
-            }
-            if meta.is_dir() {
-                stack.push(entry.path());
-            }
-            else if meta.is_file() {
-                total = total.saturating_add(meta.len());
-            }
-        }
-    }
-    total
+    crate::safety::collect_usage(path).bytes
 }

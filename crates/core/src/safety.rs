@@ -10,6 +10,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use boost_fs::walk::{ErrorPolicy, Walker};
+
 use crate::{
     Error, Result,
     locations::{BaseDirs, base_dirs},
@@ -53,7 +55,7 @@ pub(crate) fn is_fresh(stamp_unix_ms: u64, now_ms: u64) -> bool {
 /// points are ignored rather than followed, and an unreadable directory has no
 /// timestamp at all.
 pub(crate) fn newest_entry_unix_ms(path: &Path) -> Option<u64> {
-    let read = std::fs::read_dir(path).ok()?;
+    let read = boost_fs::read_dir(path).ok()?;
     let mut newest: Option<u64> = None;
     for entry in read.flatten() {
         let Ok(meta) = entry.metadata()
@@ -148,7 +150,7 @@ pub(crate) fn ensure_cleanup_root(path: &Path, capability: &'static str) -> Resu
     if !path.is_absolute() {
         return Err(Error::Message(format!("{capability}: root must be absolute, got {}", path.display())));
     }
-    let meta = std::fs::symlink_metadata(path).map_err(|error| Error::Io { path: path.display().to_string(), source: error })?;
+    let meta = boost_fs::symlink_metadata(path).map_err(|error| Error::Io { path: path.display().to_string(), source: error })?;
     if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
         return Err(Error::Message(format!("{capability}: root is a symbolic link or junction: {}", path.display())));
     }
@@ -205,10 +207,10 @@ pub(crate) fn probe_dir_in_use(path: &Path) -> bool {
     if probe.exists() {
         return true;
     }
-    if std::fs::rename(path, &probe).is_err() {
+    if boost_fs::rename(path, &probe).is_err() {
         return true;
     }
-    std::fs::rename(&probe, path).is_err()
+    boost_fs::rename(&probe, path).is_err()
 }
 
 /// Per-file occupancy probe. It asks for `DELETE` access, so a file that a
@@ -281,42 +283,41 @@ pub(crate) struct Usage {
     pub errors: u64,
 }
 
-/// Recursive usage of one directory. Reparse points are never followed.
+/// Recursive usage of one directory, measured by the `boost-fs` walk kernel.
+/// Reparse points are never followed, and a directory that cannot be listed
+/// counts as one error without aborting the rest of the dive.
 pub(crate) fn collect_usage(root: &Path) -> Usage {
     let mut usage = Usage::default();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir)
-        else {
-            usage.errors += 1;
-            continue;
-        };
-        usage.dirs += 1;
-        for entry in read {
-            let Ok(entry) = entry
-            else {
-                usage.errors += 1;
-                continue;
-            };
-            let Ok(meta) = entry.metadata()
-            else {
-                usage.errors += 1;
-                continue;
-            };
-            if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
-                continue;
+    for item in Walker::new(root).error_policy(ErrorPolicy::Lenient) {
+        match item {
+            Ok(entry) => {
+                let Ok(meta) = entry.metadata()
+                else {
+                    usage.errors += 1;
+                    continue;
+                };
+                if platform::is_link_like(&meta) || meta.file_type().is_symlink() {
+                    continue;
+                }
+                if entry.is_folder() {
+                    usage.dirs += 1;
+                    continue;
+                }
+                if !entry.is_file() {
+                    continue;
+                }
+                usage.files += 1;
+                usage.bytes = usage.bytes.saturating_add(meta.len());
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|elapsed| elapsed.as_millis() as u64);
+                if let Some(stamp) = modified {
+                    usage.newest_unix_ms = Some(usage.newest_unix_ms.map_or(stamp, |current| current.max(stamp)));
+                }
             }
-            if meta.is_dir() {
-                stack.push(entry.path());
-                continue;
-            }
-            usage.files += 1;
-            usage.bytes = usage.bytes.saturating_add(meta.len());
-            let modified =
-                meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|elapsed| elapsed.as_millis() as u64);
-            if let Some(stamp) = modified {
-                usage.newest_unix_ms = Some(usage.newest_unix_ms.map_or(stamp, |current| current.max(stamp)));
-            }
+            Err(_) => usage.errors += 1,
         }
     }
     usage

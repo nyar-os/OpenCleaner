@@ -3,7 +3,6 @@
 //! semantics.
 
 use std::{
-    fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -40,7 +39,7 @@ pub(crate) fn write(request: &BackupRequest<'_>, dir: Option<&Path>, dirs: &Base
     else {
         return Err(Error::dependency_blocked("env-path-backup", "no per-user data directory is available for the rollback file"));
     };
-    fs::create_dir_all(&dir).map_err(|source| Error::Io { path: dir.display().to_string(), source })?;
+    boost_fs::create_folder_all(&dir).map_err(|source| Error::Io { path: dir.display().to_string(), source })?;
 
     let stamp = request.created_at_unix_ms;
     let stem = format!("path-env-{}-{stamp}", request.scope.id());
@@ -59,8 +58,8 @@ pub(crate) fn write(request: &BackupRequest<'_>, dir: Option<&Path>, dirs: &Base
     });
     let text = serde_json::to_string_pretty(&body).map_err(|error| Error::Message(format!("cannot encode PATH backup: {error}")))?;
 
-    fs::write(&json_path, text).map_err(|source| Error::Io { path: json_path.display().to_string(), source })?;
-    fs::write(&reg_path, &restore_reg_text).map_err(|source| Error::Io { path: reg_path.display().to_string(), source })?;
+    boost_fs::write(&json_path, text).map_err(|source| Error::Io { path: json_path.display().to_string(), source })?;
+    boost_fs::write(&reg_path, &restore_reg_text).map_err(|source| Error::Io { path: reg_path.display().to_string(), source })?;
 
     Ok(EnvPathBackup {
         json_path: json_path.display().to_string(),
@@ -97,6 +96,8 @@ pub(crate) fn now_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
