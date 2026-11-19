@@ -28,3 +28,6 @@ dist/
 
 # VMZ
 packages/open-cleaner-ui/.cache/
+
+# npm secrets (nifty)
+.secrets/
